@@ -6,13 +6,14 @@ app.use(express.json());
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+// Opcional: tu número de WA business (solo dígitos) para evitar responderte a vos mismo si llega
+const BUSINESS_WA_ID = process.env.BUSINESS_WA_ID; // ej: "15551688469"
 
-// Health check
 app.get("/", (req, res) => {
   res.send("Bot WhatsApp OK");
 });
 
-// Webhook verification
+// Webhook verification (Meta)
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -27,9 +28,9 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Incoming messages
+// Incoming events (messages, statuses, etc.)
 app.post("/webhook", async (req, res) => {
-  // Siempre respondemos 200 rápido para que Meta no reintente
+  // Respondemos 200 enseguida para que Meta no reintente
   res.sendStatus(200);
 
   try {
@@ -37,73 +38,101 @@ app.post("/webhook", async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value;
 
-    const message = value?.messages?.[0];
+    // Log mínimo para debug (no imprimas tokens)
+    console.log("📦 Incoming webhook keys:", {
+      hasMessages: Boolean(value?.messages?.length),
+      hasStatuses: Boolean(value?.statuses?.length),
+      metadata: value?.metadata ? { phone_number_id: value.metadata.phone_number_id } : null,
+    });
 
-    // A veces llegan status updates, etc.
-    if (!message) {
-      // Log útil para ver qué está llegando
-      const statuses = value?.statuses?.[0];
-      if (statuses) {
-        console.log("ℹ️ Status update:", {
-          id: statuses.id,
-          status: statuses.status,
-          recipient_id: statuses.recipient_id,
-          timestamp: statuses.timestamp
-        });
-      } else {
-        console.log("ℹ️ No message in payload (ignored)");
-      }
+    // Si llega un status update (delivery/read), lo ignoramos
+    const status = value?.statuses?.[0];
+    if (status && !value?.messages?.length) {
+      console.log("ℹ️ Status update:", {
+        id: status.id,
+        status: status.status,
+        recipient_id: status.recipient_id,
+        timestamp: status.timestamp,
+      });
       return;
     }
 
-    const from = message.from; // wa_id real del usuario
+    const message = value?.messages?.[0];
+    if (!message) {
+      console.log("ℹ️ No message found (ignored).");
+      return;
+    }
+
+    const from = message.from; // wa_id real (solo dígitos)
     const text = message?.text?.body || "";
+    const msgType = message.type;
 
-    // 🔥 Esto es lo clave para tu caso:
-    console.log("📩 INCOMING FROM (wa_id):", from);
-    console.log("📝 TEXT:", text);
+    // Logueo CLAVE: esto nos dice el wa_id exacto que Meta usa
+    console.log("📩 FROM (wa_id):", from);
+    console.log("🧾 Message:", { id: message.id, type: msgType, timestamp: message.timestamp });
+    console.log("📝 Text:", text);
 
-    // Log extra (recortado) por si hace falta
-    console.log("🔎 MESSAGE META:", {
-      id: message.id,
-      type: message.type,
-      timestamp: message.timestamp
-    });
+    // Evitar loops si por alguna razón llega un mensaje del propio business
+    if (BUSINESS_WA_ID && from === BUSINESS_WA_ID) {
+      console.log("↩️ Ignored: message from business wa_id (loop prevention).");
+      return;
+    }
 
-    const reply = `🤖 Bot activo. Dijiste: "${text}"`;
-    const result = await sendText(from, reply);
+    // Solo respondemos a texto por ahora
+    if (msgType !== "text") {
+      await safeSend(from, "Por ahora solo entiendo mensajes de texto 🙂");
+      return;
+    }
 
-    console.log("✅ Sent reply OK:", result);
+    // ✅ Normalización AR: si viene 54... pero no 549..., lo convertimos a 549...
+    let to = from;
+    if (to.startsWith("54") && !to.startsWith("549")) {
+      to = "549" + to.slice(2);
+    }
+    console.log("📤 TO (normalized):", to);
+
+    await safeSend(to, `🤖 Bot activo. Dijiste: "${text}"`);
   } catch (err) {
     console.error("Webhook processing error:", err?.message || err);
   }
 });
 
+async function safeSend(to, body) {
+  try {
+    const result = await sendText(to, body);
+    console.log("✅ Sent OK:", result);
+  } catch (err) {
+    console.error("❌ sendText error:", err?.message || err);
+  }
+}
+
 async function sendText(to, body) {
+  if (!WHATSAPP_TOKEN) throw new Error("Missing env WHATSAPP_TOKEN");
+  if (!PHONE_NUMBER_ID) throw new Error("Missing env PHONE_NUMBER_ID");
+
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
   const resp = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body }
-    })
+      text: { body },
+    }),
   });
 
   const dataText = await resp.text();
 
   if (!resp.ok) {
-    // Esto te va a mostrar EXACTO por qué falla (ej 131030)
     throw new Error(`sendText failed (${resp.status}): ${dataText}`);
   }
 
-  // dataText suele ser JSON, pero lo devolvemos parseado si se puede
+  // Meta responde JSON
   try {
     return JSON.parse(dataText);
   } catch {
