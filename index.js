@@ -6,6 +6,7 @@ app.use(express.json());
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const ALLOWED_TEST_NUMBER = process.env.ALLOWED_TEST_NUMBER;
 
 // Health check
 app.get("/", (req, res) => {
@@ -19,47 +20,40 @@ app.get("/webhook", (req, res) => {
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ Webhook verified");
     return res.status(200).send(challenge);
   }
-
   return res.sendStatus(403);
 });
 
 // Incoming messages
 app.post("/webhook", async (req, res) => {
-  // Respondemos 200 rápido
-  res.sendStatus(200);
-
   try {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
 
     const message = value?.messages?.[0];
-    if (!message) return;
+    if (!message) return res.sendStatus(200);
 
+    // wa_id ES el número real autorizado
+    const waId = value?.contacts?.[0]?.wa_id;
     const text = message?.text?.body || "";
 
-    // 🔑 wa_id REAL y autorizado por Meta
-    const waId = value?.contacts?.[0]?.wa_id || message.from;
+    console.log("📩 FROM (wa_id):", waId);
+    console.log("💬 TEXT:", text);
 
-    console.log("📩 message.from:", message.from);
-    console.log("👤 contacts[0].wa_id:", value?.contacts?.[0]?.wa_id);
-    console.log("📤 waId usado para responder:", waId);
-    console.log("📝 Texto:", text);
-
-    // Normalización Argentina (por seguridad)
-    let to = waId;
-    if (to.startsWith("54") && !to.startsWith("549")) {
-      to = "549" + to.slice(2);
+    // 🚨 Sandbox restriction
+    if (waId !== ALLOWED_TEST_NUMBER) {
+      console.warn("⛔ Número no autorizado en sandbox:", waId);
+      return res.sendStatus(200);
     }
 
-    console.log("📤 TO (final):", to);
+    await sendText(waId, `🤖 Bot activo. Dijiste: "${text}"`);
+    return res.sendStatus(200);
 
-    await sendText(to, `🤖 Bot activo. Dijiste: "${text}"`);
   } catch (err) {
-    console.error("Webhook processing error:", err?.message || err);
+    console.error("Webhook error:", err.message);
+    return res.sendStatus(200);
   }
 });
 
@@ -70,26 +64,23 @@ async function sendText(to, body) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body },
-    }),
+      text: { body }
+    })
   });
 
-  const data = await resp.text();
-
   if (!resp.ok) {
+    const data = await resp.text();
     throw new Error(`sendText failed (${resp.status}): ${data}`);
   }
-
-  return JSON.parse(data);
 }
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`🚀 Server running on port ${port}`);
 });
