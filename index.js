@@ -35,6 +35,7 @@ app.get("/debug", async (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
+  // Respondemos 200 OK inmediatamente para evitar reintentos de Meta
   res.sendStatus(200);
 
   try {
@@ -42,18 +43,27 @@ app.post("/webhook", async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value;
 
-    const metadataPhoneId = value?.metadata?.phone_number_id;
-
-    console.log("🔧 ENV PHONE_NUMBER_ID:", PHONE_NUMBER_ID);
-    console.log("📦 WEBHOOK metadata.phone_number_id:", metadataPhoneId);
+    // Si no es un mensaje, salimos
+    if (!value?.messages) return;
 
     const message = value?.messages?.[0];
     if (!message) return;
 
-    const waId = value?.contacts?.[0]?.wa_id || message.from;
+    // Obtenemos el ID original
+    let waId = value?.contacts?.[0]?.wa_id || message.from;
     const text = message?.text?.body || "";
-    console.log("📩 FROM (wa_id):", waId);
+    
+    console.log("📩 FROM ORIGINAL (wa_id):", waId);
     console.log("💬 TEXT:", text);
+
+    // --- CORRECCIÓN PARA ARGENTINA ---
+    // El sender suele llegar como '54911...', pero para enviar (to),
+    // la API suele requerir '5411...' (sin el 9).
+    if (waId.startsWith("549")) {
+        waId = "54" + waId.substring(3);
+        console.log("🇦🇷 Número corregido para envío:", waId);
+    }
+    // ---------------------------------
 
     // probamos envío template
     await sendTemplate(waId, "hello_world", "en_US");
@@ -66,6 +76,8 @@ app.post("/webhook", async (req, res) => {
 async function sendTemplate(to, templateName, languageCode = "en_US") {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
+  console.log(`📤 Intentando enviar a: ${to}`); // Log para depurar
+
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -74,7 +86,7 @@ async function sendTemplate(to, templateName, languageCode = "en_US") {
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to,
+      to: to, // Aquí usamos el número ya corregido
       type: "template",
       template: {
         name: templateName,
@@ -84,7 +96,14 @@ async function sendTemplate(to, templateName, languageCode = "en_US") {
   });
 
   const data = await resp.text();
-  if (!resp.ok) throw new Error(`sendTemplate failed (${resp.status}): ${data}`);
+  
+  if (!resp.ok) {
+      // Logueamos el error completo para verlo en Render
+      console.error(`❌ Error Meta API: ${data}`);
+      throw new Error(`sendTemplate failed (${resp.status}): ${data}`);
+  }
+  
+  return JSON.parse(data);
 }
 
 const port = process.env.PORT || 3000;
