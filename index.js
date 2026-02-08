@@ -7,7 +7,9 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-app.get("/", (req, res) => res.send("Bot WhatsApp OK"));
+app.get("/", (req, res) => {
+  res.send("Bot WhatsApp OK");
+});
 
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -18,6 +20,20 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// ✅ Endpoint para chequear que el token y el phone_number_id matchean
+app.get("/debug", async (req, res) => {
+  try {
+    const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}?fields=display_phone_number,verified_name,quality_rating`;
+    const r = await fetch(url, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    });
+    const t = await r.text();
+    return res.status(r.status).send(t);
+  } catch (e) {
+    return res.status(500).send(String(e?.message || e));
+  }
+});
+
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -26,21 +42,24 @@ app.post("/webhook", async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value;
 
+    const metadataPhoneId = value?.metadata?.phone_number_id;
+
+    console.log("🔧 ENV PHONE_NUMBER_ID:", PHONE_NUMBER_ID);
+    console.log("📦 WEBHOOK metadata.phone_number_id:", metadataPhoneId);
+
     const message = value?.messages?.[0];
     if (!message) return;
 
     const waId = value?.contacts?.[0]?.wa_id || message.from;
     const text = message?.text?.body || "";
-
     console.log("📩 FROM (wa_id):", waId);
     console.log("💬 TEXT:", text);
 
-    // 🔥 En sandbox: responder con TEMPLATE (no text) para evitar 131030
+    // probamos envío template
     await sendTemplate(waId, "hello_world", "en_US");
-
     console.log("✅ Template sent OK");
   } catch (err) {
-    console.error("Webhook error:", err?.message || err);
+    console.error("❌ Webhook error:", err?.message || err);
   }
 });
 
