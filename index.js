@@ -9,12 +9,12 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Configuración de Gemini mejorada
+// Configuración de Gemini 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-// Usamos gemini-1.5-flash que es el estándar actual
+// Forzamos el modelo específico que está activo y disponible
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-app.get("/", (req, res) => res.send("Bot Inteligente OK"));
+app.get("/", (req, res) => res.send("Bot Inteligente Funcionando"));
 
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -36,41 +36,42 @@ app.post("/webhook", async (req, res) => {
     let waId = value?.contacts?.[0]?.wa_id || message.from;
     const textReceived = message?.text?.body || "";
 
+    // Corrección para Argentina (Eliminar el 9 intermedio)
     if (waId.startsWith("549")) waId = "54" + waId.substring(3);
 
     console.log(`📩 Mensaje de ${waId}: ${textReceived}`);
 
-    // Lógica de Precios
+    // Prioridad: Lógica de Precios
     const lowerText = textReceived.toLowerCase();
-    if (lowerText.includes("precio") || lowerText.includes("cuánto cuesta") || lowerText.includes("planes")) {
-        await sendText(waId, "¡Claro! Aquí tienes nuestras opciones principales:");
-        await sendImage(waId, "https://picsum.photos/seed/plan1/600/400", "🌟 *Plan Básico*\nPrecio: $1.000");
-        await sendImage(waId, "https://picsum.photos/seed/plan2/600/400", "🚀 *Plan Pro*\nPrecio: $2.500");
+    if (lowerText.includes("precio") || lowerText.includes("cuánto cuesta")) {
+        await sendText(waId, "💰 *Nuestros Planes:*");
+        await sendImage(waId, "https://picsum.photos/seed/plan1/600/400", "🌟 Plan Básico: $1.000");
+        await sendImage(waId, "https://picsum.photos/seed/plan2/600/400", "🚀 Plan Pro: $2.500");
         return;
     }
 
-    // --- LÓGICA DE IA ---
-    // Agregamos un bloque try-catch específico para la IA para no romper el bot si falla
+    // Respuesta con IA Gemini
     try {
-        const prompt = `Eres un asistente virtual amable. Responde brevemente: "${textReceived}"`;
+        const prompt = `Eres un asistente de WhatsApp. Responde de forma muy breve y con emojis. Usuario dice: ${textReceived}`;
+        
+        // Nueva forma de llamada más robusta
         const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const aiResponse = response.text();
+        const aiResponse = result.response.text();
 
         await sendText(waId, aiResponse);
     } catch (aiErr) {
-        console.error("❌ Error en Gemini:", aiErr.message);
-        await sendText(waId, "Lo siento, mi cerebro artificial tuvo un pequeño hipo. ¿Podrías repetir eso?");
+        console.error("❌ Error específico de Gemini:", aiErr.message);
+        await sendText(waId, "Hola! En este momento estoy actualizando mi sistema. ¿Podrías escribirme de nuevo en un minuto? 🤖");
     }
 
   } catch (err) {
-    console.error("❌ Webhook error:", err);
+    console.error("❌ Error General Webhook:", err);
   }
 });
 
+// Funciones de envío a la API de Meta
 async function sendText(to, text) {
-  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-  await fetch(url, {
+  await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: text } }),
@@ -78,8 +79,7 @@ async function sendText(to, text) {
 }
 
 async function sendImage(to, url, caption) {
-  const fbUrl = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-  await fetch(fbUrl, {
+  await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ 
@@ -91,5 +91,5 @@ async function sendImage(to, url, caption) {
   });
 }
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`🚀 Bot en puerto ${port}`));
+const port = process.env.PORT || 1000;
+app.listen(port, () => console.log(`🚀 Server on port ${port}`));
