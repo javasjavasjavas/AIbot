@@ -20,63 +20,54 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// ✅ Endpoint para chequear que el token y el phone_number_id matchean
-app.get("/debug", async (req, res) => {
-  try {
-    const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}?fields=display_phone_number,verified_name,quality_rating`;
-    const r = await fetch(url, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-    });
-    const t = await r.text();
-    return res.status(r.status).send(t);
-  } catch (e) {
-    return res.status(500).send(String(e?.message || e));
-  }
-});
-
 app.post("/webhook", async (req, res) => {
-  // Respondemos 200 OK inmediatamente para evitar reintentos de Meta
   res.sendStatus(200);
 
   try {
     const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    const value = entry?.changes?.[0]?.value;
 
-    // Si no es un mensaje, salimos
     if (!value?.messages) return;
 
     const message = value?.messages?.[0];
     if (!message) return;
 
-    // Obtenemos el ID original
     let waId = value?.contacts?.[0]?.wa_id || message.from;
-    const text = message?.text?.body || "";
+    const textReceived = (message?.text?.body || "").toLowerCase().trim(); // Pasamos a minúsculas
     
-    console.log("📩 FROM ORIGINAL (wa_id):", waId);
-    console.log("💬 TEXT:", text);
-
-    // --- CORRECCIÓN PARA ARGENTINA ---
-    // El sender suele llegar como '54911...', pero para enviar (to),
-    // la API suele requerir '5411...' (sin el 9).
+    // Corrección para Argentina
     if (waId.startsWith("549")) {
         waId = "54" + waId.substring(3);
-        console.log("🇦🇷 Número corregido para envío:", waId);
     }
-    // ---------------------------------
 
-    // probamos envío template
-    await sendTemplate(waId, "hello_world", "en_US");
-    console.log("✅ Template sent OK");
+    console.log(`📩 Recibido: ${textReceived} de ${waId}`);
+
+    // --- LÓGICA DE RESPUESTAS PERSONALIZADAS ---
+    let respuesta = "";
+
+    if (textReceived === "hola" || textReceived === "buen día") {
+        respuesta = "¡Hola! 👋 Soy tu asistente virtual. ¿En qué puedo ayudarte hoy?";
+    } 
+    else if (textReceived.includes("precio") || textReceived.includes("costo")) {
+        respuesta = "Nuestros servicios varían según tus necesidades. ¿Te gustaría que un asesor humano te contacte?";
+    } 
+    else if (textReceived === "chau" || textReceived === "gracias") {
+        respuesta = "¡De nada! Fue un placer ayudarte. ¡Hasta luego! 😊";
+    } 
+    else {
+        respuesta = `Recibí tu mensaje: "${textReceived}". No estoy seguro de cómo responder a eso, pero puedes intentar decir "Hola" o preguntar por "Precios".`;
+    }
+
+    await sendText(waId, respuesta);
+    console.log("✅ Respuesta enviada con éxito");
+    
   } catch (err) {
     console.error("❌ Webhook error:", err?.message || err);
   }
 });
 
-async function sendTemplate(to, templateName, languageCode = "en_US") {
+async function sendText(to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-
-  console.log(`📤 Intentando enviar a: ${to}`); // Log para depurar
 
   const resp = await fetch(url, {
     method: "POST",
@@ -86,24 +77,17 @@ async function sendTemplate(to, templateName, languageCode = "en_US") {
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to: to, // Aquí usamos el número ya corregido
-      type: "template",
-      template: {
-        name: templateName,
-        language: { code: languageCode },
-      },
+      to: to,
+      type: "text",
+      text: { body: text },
     }),
   });
 
   const data = await resp.text();
-  
   if (!resp.ok) {
-      // Logueamos el error completo para verlo en Render
       console.error(`❌ Error Meta API: ${data}`);
-      throw new Error(`sendTemplate failed (${resp.status}): ${data}`);
+      throw new Error(`sendText failed: ${data}`);
   }
-  
-  return JSON.parse(data);
 }
 
 const port = process.env.PORT || 3000;
