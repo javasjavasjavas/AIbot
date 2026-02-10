@@ -4,18 +4,15 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const app = express();
 app.use(express.json());
 
-// Variables de entorno (Configuradas en el Dashboard de Render)
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Configuración de Gemini
+// Configuración de Gemini mejorada
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-1.5-flash",
-    generationConfig: { maxOutputTokens: 200 } // Respuestas breves para WhatsApp
-});
+// Usamos gemini-1.5-flash que es el estándar actual
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 app.get("/", (req, res) => res.send("Bot Inteligente OK"));
 
@@ -39,43 +36,37 @@ app.post("/webhook", async (req, res) => {
     let waId = value?.contacts?.[0]?.wa_id || message.from;
     const textReceived = message?.text?.body || "";
 
-    // Corrección para Argentina
     if (waId.startsWith("549")) waId = "54" + waId.substring(3);
 
     console.log(`📩 Mensaje de ${waId}: ${textReceived}`);
 
-    // --- LÓGICA 1: PRECIOS CON FOTOS (Prioridad) ---
+    // Lógica de Precios
     const lowerText = textReceived.toLowerCase();
     if (lowerText.includes("precio") || lowerText.includes("cuánto cuesta") || lowerText.includes("planes")) {
         await sendText(waId, "¡Claro! Aquí tienes nuestras opciones principales:");
-        
-        // Opción 1
-        await sendImage(waId, "https://picsum.photos/seed/plan1/600/400", "🌟 *Plan Básico*\nPrecio: $1.000\nIdeal para uso personal.");
-        
-        // Opción 2
-        await sendImage(waId, "https://picsum.photos/seed/plan2/600/400", "🚀 *Plan Pro*\nPrecio: $2.500\nIncluye soporte 24/7.");
-        
-        // Opción 3
-        await sendImage(waId, "https://picsum.photos/seed/plan3/600/400", "🏢 *Plan Business*\nPrecio: $5.000\nPara empresas grandes.");
+        await sendImage(waId, "https://picsum.photos/seed/plan1/600/400", "🌟 *Plan Básico*\nPrecio: $1.000");
+        await sendImage(waId, "https://picsum.photos/seed/plan2/600/400", "🚀 *Plan Pro*\nPrecio: $2.500");
         return;
     }
 
-    // --- LÓGICA 2: IA GEMINI (Para todo lo demás) ---
-    const prompt = `Eres un asistente virtual de "Mi Empresa". Eres amable, breve y usas emojis. 
-    Responde a esto: "${textReceived}"`;
+    // --- LÓGICA DE IA ---
+    // Agregamos un bloque try-catch específico para la IA para no romper el bot si falla
+    try {
+        const prompt = `Eres un asistente virtual amable. Responde brevemente: "${textReceived}"`;
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const aiResponse = response.text();
 
-    const result = await model.generateContent(prompt);
-    const aiResponse = result.response.text();
-
-    await sendText(waId, aiResponse);
-    console.log("✅ Respuesta de IA enviada");
+        await sendText(waId, aiResponse);
+    } catch (aiErr) {
+        console.error("❌ Error en Gemini:", aiErr.message);
+        await sendText(waId, "Lo siento, mi cerebro artificial tuvo un pequeño hipo. ¿Podrías repetir eso?");
+    }
 
   } catch (err) {
     console.error("❌ Webhook error:", err);
   }
 });
-
-// --- FUNCIONES AUXILIARES ---
 
 async function sendText(to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
