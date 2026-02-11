@@ -10,14 +10,18 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// Opcional: si querés mandar la imagen real de planes, subila a una URL pública y ponela acá
+// (WhatsApp solo puede enviar imágenes por link público)
+const PLANS_IMAGE_URL = process.env.PLANS_IMAGE_URL || ""; // ej: https://tuweb.com/planes.png
+const CLASSES_IMAGE_URL = process.env.CLASSES_IMAGE_URL || ""; // ej: https://tuweb.com/clases.png
+
 // ======================
-// MEMORIA CONVERSACIONAL (RAM por usuario)
+// MEMORIA CONVERSACIONAL (RAM)
 // ======================
-// memory.get(waId) => { history: [{role, text}...], lastSeen }
 const memory = new Map();
 
-const MAX_TURNS = 10; // cantidad aprox de turnos (usuario+bot). En history se guardan mensajes, por eso *2.
-const MEMORY_TTL_MS = 1000 * 60 * 60 * 6; // 6 horas de inactividad => se borra
+const MAX_TURNS = 10; // turnos aprox (user+bot). Se guarda como mensajes, por eso *2 al recortar
+const MEMORY_TTL_MS = 1000 * 60 * 60 * 6; // 6 horas
 
 function getOrCreateSession(waId) {
   const now = Date.now();
@@ -50,10 +54,182 @@ function cleanupOldSessions() {
 setInterval(cleanupOldSessions, 1000 * 60 * 10);
 
 // ======================
+// DATOS DEL GIMNASIO (Planes + Clases)
+// ======================
+function formatPlansText() {
+  // Según tu imagen:
+  // Plan Black: $42.990/mes, 12 meses fidelidad, inscripción gratis, incluye acceso a sedes LatAm, 5 pases, sillones, etc. (NO sin permanencia mínima)
+  // Plan Fit:   $34.990/mes, 12 meses fidelidad, inscripción gratis, más básico
+  // Plan Smart: $39.990/mes, sin fidelidad, inscripción gratis, sin permanencia mínima (NO pases, NO sillones)
+  return (
+    "💳 *Planes disponibles:*\n\n" +
+    "🖤 *Plan Black* — *$42.990/mes*\n" +
+    "• 12 meses de fidelidad\n" +
+    "• Inscripción gratis\n" +
+    "• Acceso a área de peso libre, peso integrado, cardio y clases grupales\n" +
+    "• Acceso a sedes del país y Latinoamérica\n" +
+    "• Smart Fit app\n" +
+    "• 5 pases al mes para invitar amigos\n" +
+    "• Sillones de masaje\n\n" +
+    "💪 *Plan Fit* — *$34.990/mes*\n" +
+    "• 12 meses de fidelidad\n" +
+    "• Inscripción gratis\n" +
+    "• Área de peso libre, peso integrado, cardio y clases grupales\n" +
+    "• Smart Fit app\n\n" +
+    "🧠 *Plan Smart* — *$39.990/mes*\n" +
+    "• Sin fidelidad\n" +
+    "• Inscripción gratis\n" +
+    "• Área de peso libre, peso integrado, cardio y clases grupales\n" +
+    "• Smart Fit app\n" +
+    "• *Sin permanencia mínima*\n\n" +
+    "Si querés, decime cuál te interesa y te explico diferencias en 2 líneas 🙂"
+  );
+}
+
+// Grilla según tu imagen (día/hora -> clase)
+const CLASS_SCHEDULE = {
+  funcional: [
+    { day: "Lunes", time: "08:00" }, { day: "Lunes", time: "09:00" }, { day: "Lunes", time: "11:00" }, { day: "Lunes", time: "16:00" }, { day: "Lunes", time: "18:00" }, { day: "Lunes", time: "20:00" }, { day: "Lunes", time: "21:00" },
+    { day: "Martes", time: "08:00" }, { day: "Martes", time: "09:00" }, { day: "Martes", time: "11:00" }, { day: "Martes", time: "16:00" }, { day: "Martes", time: "18:00" }, { day: "Martes", time: "21:00" },
+    { day: "Miércoles", time: "08:00" }, { day: "Miércoles", time: "09:00" }, { day: "Miércoles", time: "11:00" }, { day: "Miércoles", time: "16:00" }, { day: "Miércoles", time: "18:00" }, { day: "Miércoles", time: "20:00" },
+    { day: "Jueves", time: "08:00" }, { day: "Jueves", time: "09:00" }, { day: "Jueves", time: "11:00" }, { day: "Jueves", time: "16:00" }, { day: "Jueves", time: "18:00" }, { day: "Jueves", time: "21:00" },
+    { day: "Viernes", time: "08:00" }, { day: "Viernes", time: "09:00" }, { day: "Viernes", time: "11:00" }, { day: "Viernes", time: "16:00" }, { day: "Viernes", time: "18:00" }, { day: "Viernes", time: "20:00" },
+    { day: "Sábado", time: "11:00" }, { day: "Sábado", time: "16:00" }
+  ],
+  fitcombat: [
+    { day: "Lunes", time: "10:00" },
+    { day: "Miércoles", time: "10:00" },
+    { day: "Viernes", time: "10:00" },
+    { day: "Martes", time: "20:00" },
+    { day: "Jueves", time: "20:00" },
+    { day: "Sábado", time: "10:00" }
+  ],
+  zumba: [
+    { day: "Martes", time: "10:00" },
+    { day: "Jueves", time: "10:00" },
+    { day: "Martes", time: "17:00" },
+    { day: "Jueves", time: "17:00" },
+    { day: "Sábado", time: "12:00" }
+  ],
+  abs: [
+    { day: "Lunes", time: "12:00" },
+    { day: "Miércoles", time: "12:00" },
+    { day: "Viernes", time: "12:00" }
+  ],
+  stretching: [
+    { day: "Martes", time: "12:00" },
+    { day: "Jueves", time: "12:00" },
+    { day: "Miércoles", time: "21:00" },
+    { day: "Viernes", time: "21:00" }
+  ],
+  "full local": [
+    { day: "Lunes", time: "17:00" },
+    { day: "Miércoles", time: "17:00" },
+    { day: "Viernes", time: "17:00" },
+    { day: "Martes", time: "19:00" },
+    { day: "Jueves", time: "19:00" }
+  ],
+  gap: [
+    { day: "Lunes", time: "19:00" },
+    { day: "Miércoles", time: "19:00" },
+    { day: "Viernes", time: "19:00" }
+  ]
+};
+
+// Alias para detectar cómo lo escribe la gente
+const CLASS_ALIASES = [
+  { key: "funcional", match: ["funcional"] },
+  { key: "fitcombat", match: ["fitcombat", "fit combat"] },
+  { key: "zumba", match: ["zumba"] },
+  { key: "abs", match: ["abs", "abdominales"] },
+  { key: "stretching", match: ["stretching", "estiramiento", "elongación", "elongacion"] },
+  { key: "full local", match: ["full local", "full"] },
+  { key: "gap", match: ["gap"] }
+];
+
+function normalizeText(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .trim();
+}
+
+function detectClass(text) {
+  const t = normalizeText(text);
+  for (const a of CLASS_ALIASES) {
+    for (const m of a.match) {
+      if (t.includes(normalizeText(m))) return a.key;
+    }
+  }
+  return null;
+}
+
+function formatClassSchedule(classKey) {
+  const items = CLASS_SCHEDULE[classKey];
+  if (!items || !items.length) return null;
+
+  // Agrupar por día
+  const byDay = {};
+  for (const it of items) {
+    if (!byDay[it.day]) byDay[it.day] = [];
+    byDay[it.day].push(it.time);
+  }
+  // Ordenar horarios
+  for (const day of Object.keys(byDay)) {
+    byDay[day].sort();
+  }
+
+  const prettyName =
+    classKey === "full local" ? "Full local" :
+    classKey.charAt(0).toUpperCase() + classKey.slice(1);
+
+  let out = `📅 *Horarios de ${prettyName}:*\n`;
+  const dayOrder = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+  for (const d of dayOrder) {
+    if (byDay[d]?.length) {
+      out += `• *${d}*: ${byDay[d].join(", ")}\n`;
+    }
+  }
+
+  out += "\nSi querés, decime *qué día preferís* y te recomiendo el mejor horario 🙂";
+  return out;
+}
+
+function isAskingPrices(text) {
+  const t = normalizeText(text);
+  return (
+    t.includes("precio") ||
+    t.includes("precios") ||
+    t.includes("planes") ||
+    t.includes("membresia") ||
+    t.includes("membresía") ||
+    t.includes("cuanto cuesta") ||
+    t.includes("cuanto sale") ||
+    t.includes("valor")
+  );
+}
+
+function isAskingClasses(text) {
+  const t = normalizeText(text);
+  const hasKeyword =
+    t.includes("clase") ||
+    t.includes("clases") ||
+    t.includes("horario") ||
+    t.includes("horarios") ||
+    t.includes("grilla") ||
+    t.includes("cronograma");
+
+  // O menciona una clase directamente
+  const classKey = detectClass(text);
+  return hasKeyword || !!classKey;
+}
+
+// ======================
 // ROUTES
 // ======================
 app.get("/", (req, res) => {
-  res.send(`Bot OK ✅ | Gemini: ${GEMINI_MODEL} | Memoria: RAM`);
+  res.send(`Gym Bot OK ✅ | Gemini: ${GEMINI_MODEL} | Memoria: RAM`);
 });
 
 app.get("/webhook", (req, res) => {
@@ -77,60 +253,88 @@ app.post("/webhook", async (req, res) => {
     if (!value?.messages?.length) return;
 
     const message = value.messages[0];
-
-    // waId correcto (contactos o from)
     let waId = value?.contacts?.[0]?.wa_id || message.from;
-
     const textReceived = message?.text?.body || "";
 
     // Corrección Argentina: 549xxxxxxxxx -> 54xxxxxxxxx
-    if (waId?.startsWith("549")) {
-      waId = "54" + waId.substring(3);
-    }
+    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
 
     console.log(`📩 Mensaje de ${waId}: ${textReceived}`);
 
-    const lowerText = textReceived.toLowerCase().trim();
+    const lowerText = normalizeText(textReceived);
 
-    // Reset memoria manual
+    // Comandos
     if (lowerText === "reset" || lowerText === "reiniciar" || lowerText === "borrar memoria") {
       memory.delete(waId);
       await sendText(waId, "🧠✅ Listo. Borré la memoria de esta conversación.");
       return;
     }
 
-    // Regla de negocio: precios
-    if (lowerText.includes("precio") || lowerText.includes("cuánto cuesta") || lowerText.includes("cuanto cuesta")) {
-      await sendText(waId, "💰 *Nuestros Planes:*");
-      await sendImage(waId, "https://picsum.photos/seed/p1/600/400", "🌟 *Plan Básico*\n$1.000");
-      await sendImage(waId, "https://picsum.photos/seed/p2/600/400", "🚀 *Plan Pro*\n$2.500");
-      return;
-    }
-
-    // Si no vino texto
     if (!textReceived.trim()) {
       await sendText(waId, "🙂 ¿Podés escribirme tu consulta en texto?");
       return;
     }
 
     // ======================
-    // MEMORIA: guardamos conversación
+    // 1) PRECIOS / PLANES
+    // ======================
+    if (isAskingPrices(textReceived)) {
+      const plansText = formatPlansText();
+      await sendLongText(waId, plansText);
+
+      // Opcional: enviar imagen si existe URL pública
+      if (PLANS_IMAGE_URL) {
+        await sendImage(waId, PLANS_IMAGE_URL, "📌 Planes disponibles");
+      }
+      return;
+    }
+
+    // ======================
+    // 2) CLASES / HORARIOS
+    // ======================
+    if (isAskingClasses(textReceived)) {
+      const classKey = detectClass(textReceived);
+
+      // Si el usuario dijo “horarios” pero no especificó clase
+      if (!classKey) {
+        let msg =
+          "📚 Tenemos estas clases:\n" +
+          "• Funcional\n• FitCombat\n• Zumba\n• ABS\n• Stretching\n• Full local\n• GAP\n\n" +
+          "Decime *cuál te interesa* y te paso días y horarios.";
+
+        await sendText(waId, msg);
+
+        if (CLASSES_IMAGE_URL) {
+          await sendImage(waId, CLASSES_IMAGE_URL, "🗓️ Grilla de clases");
+        }
+        return;
+      }
+
+      const scheduleText = formatClassSchedule(classKey);
+      await sendLongText(waId, scheduleText || "No encontré horarios para esa clase.");
+
+      // Opcional: enviar imagen
+      if (CLASSES_IMAGE_URL) {
+        await sendImage(waId, CLASSES_IMAGE_URL, "🗓️ Grilla de clases");
+      }
+      return;
+    }
+
+    // ======================
+    // 3) DEFAULT: Gemini con memoria
     // ======================
     const session = getOrCreateSession(waId);
 
-    // Guardar el mensaje del usuario
+    // Guardar user
     session.history.push({ role: "user", text: textReceived });
 
-    // Preguntar a Gemini con contexto y respuesta más larga/detallada
     const aiResponse = await askGeminiWithMemory(session.history);
 
-    // Guardar respuesta del bot
+    // Guardar bot
     session.history.push({ role: "model", text: aiResponse });
 
-    // Recortar historial para controlar tokens/costos
     pruneSession(session);
 
-    // Enviar (si es largo, se divide)
     await sendLongText(waId, aiResponse);
   } catch (err) {
     console.error("❌ Error General Webhook:", err);
@@ -149,19 +353,18 @@ async function askGeminiWithMemory(history) {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-    // Prompt inicial + historial
     const contents = [
       {
         role: "user",
         parts: [
           {
             text: `
-Eres un asistente inteligente que responde en español.
+Eres un asistente inteligente para un gimnasio.
+Respondes siempre en español, con tono amable y profesional.
 Da respuestas claras, desarrolladas y bien estructuradas.
-Si el tema lo requiere, explica en varios párrafos.
-Incluye ejemplos simples cuando ayuden.
-Mantén coherencia con lo dicho anteriormente en la conversación.
-Si algo no está claro, haz 1 o 2 preguntas de aclaración.
+Si el tema lo requiere, explica en varios párrafos y con ejemplos simples.
+Si una consulta es ambigua, haz 1 o 2 preguntas para aclarar.
+Mantén coherencia con lo dicho anteriormente en esta conversación.
 Evita respuestas demasiado cortas: desarrolla lo necesario, sin relleno.
 `
           }
@@ -206,7 +409,7 @@ Evita respuestas demasiado cortas: desarrolla lo necesario, sin relleno.
 }
 
 // ======================
-// WHATSAPP SENDERS (BLINDADAS)
+// WHATSAPP SENDERS
 // ======================
 async function sendText(to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
@@ -257,8 +460,7 @@ async function sendImage(to, imageUrl, caption) {
   }
 }
 
-// WhatsApp permite ~4096 caracteres.
-// Usamos 3500 para evitar cortes raros.
+// WhatsApp ~4096 chars. Usamos 3500 para ir seguros.
 async function sendLongText(to, text, chunkSize = 3500) {
   const clean = (text || "").trim();
   if (!clean) return;
@@ -283,7 +485,7 @@ async function safeRead(response) {
 }
 
 // ======================
-// START SERVER (Render-friendly)
+// START SERVER
 // ======================
 const port = process.env.PORT || 1000;
 app.listen(port, "0.0.0.0", () => console.log(`🚀 Server on port ${port}`));
