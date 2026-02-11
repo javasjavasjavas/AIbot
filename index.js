@@ -14,12 +14,16 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onrender.com";
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onrender.com").replace(/\/$/, "");
 
 // Modelos
 const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
-const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+
+// IMPORTANTE: forzamos image model correcto (no preview)
+const ENV_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "";
+const GEMINI_IMAGE_MODEL = ENV_IMAGE_MODEL.toLowerCase().includes("preview")
+  ? "gemini-2.5-flash-image"
+  : (ENV_IMAGE_MODEL || "gemini-2.5-flash-image");
 
 // Opcional: imágenes informativas (URLs públicas)
 const PLANS_IMAGE_URL = process.env.PLANS_IMAGE_URL || "";
@@ -30,37 +34,28 @@ const CLASSES_IMAGE_URL = process.env.CLASSES_IMAGE_URL || "";
 // ======================
 const GENERATED_DIR = path.join(process.cwd(), "generated");
 if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true });
-
-// Servimos imágenes generadas
 app.use("/img", express.static(GENERATED_DIR));
 
 // ======================
-// ROUTES DE TEST (para que no salga Cannot GET /)
+// HEALTH / ROOT
 // ======================
-app.get("/", (req, res) => {
-  res.send("✅ Gym Coach Bot ONLINE (GET / OK)");
-});
-
+app.get("/", (req, res) => res.send("✅ Gym Coach Bot ONLINE"));
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    webhook: "/webhook",
     publicBaseUrl: PUBLIC_BASE_URL,
+    models: { text: GEMINI_TEXT_MODEL, image: GEMINI_IMAGE_MODEL },
     env: {
       hasVerifyToken: !!VERIFY_TOKEN,
       hasWhatsappToken: !!WHATSAPP_TOKEN,
       hasPhoneNumberId: !!PHONE_NUMBER_ID,
       hasGeminiKey: !!GEMINI_API_KEY
-    },
-    models: {
-      text: GEMINI_TEXT_MODEL,
-      image: GEMINI_IMAGE_MODEL
     }
   });
 });
 
 // ======================
-// HELPERS GYM
+// HELPERS
 // ======================
 function normalizeText(s) {
   return (s || "")
@@ -70,6 +65,51 @@ function normalizeText(s) {
     .trim();
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Extrae retryDelay si viene en el error (como en tu log)
+function extractRetryDelaySeconds(errObj) {
+  try {
+    const details = errObj?.details;
+    if (!Array.isArray(details)) return null;
+    const retryInfo = details.find((d) => d["@type"]?.includes("RetryInfo"));
+    const s = retryInfo?.retryDelay;
+    if (!s) return null;
+    // formato típico: "46s"
+    if (typeof s === "string" && s.endsWith("s")) return Number(s.replace("s", ""));
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ======================
+// RATE LIMIT SIMPLE (por usuario)
+// Evita que alguien spamee y te dispare 429 todo el tiempo
+// ======================
+const userRate = new Map();
+// max 3 requests cada 30s por usuario
+const WINDOW_MS = 30_000;
+const MAX_REQ_PER_WINDOW = 3;
+
+function allowUser(waId) {
+  const now = Date.now();
+  const arr = userRate.get(waId) || [];
+  const fresh = arr.filter((t) => now - t < WINDOW_MS);
+  if (fresh.length >= MAX_REQ_PER_WINDOW) {
+    userRate.set(waId, fresh);
+    return false;
+  }
+  fresh.push(now);
+  userRate.set(waId, fresh);
+  return true;
+}
+
+// ======================
+// GYM INFO
+// ======================
 function isAskingPrices(text) {
   const t = normalizeText(text);
   return (
@@ -221,35 +261,49 @@ Style:
 }
 
 // ======================
-// WEBHOOK VERIFY (GET) YA DEFINIDO ARRIBA
+// WEBHOOK VERIFY (GET)
 // ======================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado OK");
+    return res.status(200).send(challenge);
+  }
+  console.log("❌ Webhook verify falló");
+  return res.sendStatus(403);
+});
 
 // ======================
 // WEBHOOK POST
 // ======================
 app.post("/webhook", async (req, res) => {
-  // Responder rápido a Meta
   res.sendStatus(200);
 
   try {
     const entry = req.body?.entry?.[0];
     const value = entry?.changes?.[0]?.value;
 
-    // Log para saber si llegan eventos
     console.log("📥 Webhook value:", JSON.stringify(value || {}, null, 2));
 
     if (!value?.messages?.length) return;
 
     const message = value.messages[0];
-
-    // waId correcto
     let waId = value?.contacts?.[0]?.wa_id || message.from;
 
-    // Corrección Argentina 549 -> 54
+    // Argentina 549 -> 54
     if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
 
     const text = message?.text?.body || "";
     if (!text.trim()) return;
+
+    // Rate limit por usuario (evita spam)
+    if (!allowUser(waId)) {
+      await sendText(waId, "⏳ Estoy recibiendo muchas consultas muy rápido. Probá de nuevo en 30 segundos 🙂");
+      return;
+    }
 
     // PRECIOS
     if (isAskingPrices(text)) {
@@ -272,23 +326,25 @@ app.post("/webhook", async (req, res) => {
 
     // EJERCICIOS + IMAGEN
     if (isExerciseQuery(text)) {
-      const explanation = await askGeminiText(buildCoachPrompt(text));
+      // Texto con retry
+      const explanation = await askGeminiTextWithRetry(buildCoachPrompt(text));
       await sendLongText(waId, explanation);
 
+      // Imagen con retry (si falla, no rompe el bot)
       try {
         await sendText(waId, "🖼️ Generando imagen técnica...");
-        const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
-        const imgUrl = `${PUBLIC_BASE_URL.replace(/\/$/, "")}/img/${filename}`;
+        const filename = await generateExerciseImageAndSaveWithRetry(buildExerciseImagePrompt(text));
+        const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
         await sendImage(waId, imgUrl, "✅ Ejecución correcta (referencia)");
       } catch (e) {
         console.error("❌ Imagen falló:", e?.message || e);
-        await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló (cuota/modelo). Probá más tarde.");
+        await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló por cuota/modelo. Probá en 1 minuto.");
       }
       return;
     }
 
     // DEFAULT
-    const fallback = await askGeminiText(
+    const fallback = await askGeminiTextWithRetry(
       `Sos un asistente de gimnasio. Responde en español, claro y útil.\nUsuario: ${text}`
     );
     await sendLongText(waId, fallback);
@@ -299,64 +355,89 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ======================
-// GEMINI TEXT
+// GEMINI TEXT (con retry 429)
 // ======================
-async function askGeminiText(prompt) {
+async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
   if (!GEMINI_API_KEY) return "⚠️ Falta GEMINI_API_KEY en Render.";
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.8, maxOutputTokens: 1200, topP: 0.9 }
-    })
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.8, maxOutputTokens: 1200, topP: 0.9 }
+      })
+    });
 
-  const data = await response.json();
-  if (!response.ok || data?.error) {
-    console.error("❌ Gemini text error:", data?.error || response.status);
-    return "Tuve un problema al responder 😅. Probá de nuevo.";
+    const data = await safeRead(response);
+
+    if (response.ok && !data?.error) {
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No pude generar respuesta.";
+    }
+
+    // 429 -> esperar y reintentar
+    const code = data?.error?.code || response.status;
+    if (code === 429 && attempt < maxAttempts) {
+      const retryS = extractRetryDelaySeconds(data?.error) ?? (15 * attempt);
+      console.error("❌ Gemini text 429:", data?.error?.message || data, "| retry in", retryS, "s");
+      await sleep((retryS + 1) * 1000);
+      continue;
+    }
+
+    console.error("❌ Gemini text error:", data?.error || data);
+    // Mensaje más útil (incluye hint del problema real)
+    return "Tuve un problema al responder 😅. Si esto pasa seguido, revisá que tu *API Key* sea del proyecto con billing (si no, te aplica free tier). Probá de nuevo en 1 minuto.";
   }
 
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No pude generar respuesta.";
+  return "Estoy con mucha demanda ahora mismo 😅. Probá en 1 minuto.";
 }
 
 // ======================
-// GEMINI IMAGE -> guardar PNG
+// GEMINI IMAGE (con retry 429)
 // ======================
-async function generateExerciseImageAndSave(imagePrompt) {
+async function generateExerciseImageAndSaveWithRetry(imagePrompt, maxAttempts = 3) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: imagePrompt }] }]
-    })
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: imagePrompt }] }] })
+    });
 
-  const data = await response.json();
+    const data = await safeRead(response);
 
-  if (!response.ok || data?.error) {
+    if (response.ok && !data?.error) {
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const inline = parts.find(p => p.inlineData?.data);
+      const b64 = inline?.inlineData?.data;
+      if (!b64) throw new Error("No inline image data returned");
+
+      const buffer = Buffer.from(b64, "base64");
+      const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
+      fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
+      return filename;
+    }
+
+    const code = data?.error?.code || response.status;
+    if (code === 429 && attempt < maxAttempts) {
+      const retryS = extractRetryDelaySeconds(data?.error) ?? (20 * attempt);
+      console.error("❌ Gemini image 429:", data?.error?.message || data, "| retry in", retryS, "s");
+      await sleep((retryS + 1) * 1000);
+      continue;
+    }
+
+    // Si sigue apareciendo preview-image por env, lo vas a ver acá:
+    console.error("❌ Gemini image error:", data?.error || data, "| model:", GEMINI_IMAGE_MODEL);
     throw new Error(data?.error?.message || `Image gen failed (${response.status})`);
   }
 
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.find(p => p.inlineData?.data);
-  const b64 = inline?.inlineData?.data;
-
-  if (!b64) throw new Error("No inline image data returned");
-
-  const buffer = Buffer.from(b64, "base64");
-  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
-  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
-
-  return filename;
+  throw new Error("Image gen exhausted retries");
 }
 
 // ======================
@@ -424,4 +505,8 @@ async function safeRead(r) {
 // START
 // ======================
 const port = process.env.PORT || 1000;
-app.listen(port, "0.0.0.0", () => console.log(`🚀 Server on port ${port}`));
+app.listen(port, "0.0.0.0", () => {
+  console.log(`🚀 Server on port ${port}`);
+  console.log("✅ Public base URL:", PUBLIC_BASE_URL);
+  console.log("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
+});
