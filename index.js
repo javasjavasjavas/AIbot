@@ -8,11 +8,53 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// ✅ Modelo estable (podés cambiarlo por env var GEMINI_MODEL)
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// ======================
+// MEMORIA CONVERSACIONAL (RAM por usuario)
+// ======================
+const memory = new Map();
+
+// Ajustes
+const MAX_TURNS = 10; // “turnos” de usuario+bots aprox (se guarda el doble en mensajes)
+const MEMORY_TTL_MS = 1000 * 60 * 60 * 6; // 6 horas de inactividad => se borra
+
+function getOrCreateSession(waId) {
+  const now = Date.now();
+  const existing = memory.get(waId);
+  if (existing) {
+    existing.lastSeen = now;
+    return existing;
+  }
+  const session = { history: [], lastSeen: now };
+  memory.set(waId, session);
+  return session;
+}
+
+function pruneSession(session) {
+  // history guarda mensajes individuales, no “turnos”, por eso usamos MAX_TURNS*2
+  const maxMessages = MAX_TURNS * 2;
+  if (session.history.length > maxMessages) {
+    session.history = session.history.slice(-maxMessages);
+  }
+}
+
+function cleanupOldSessions() {
+  const now = Date.now();
+  for (const [waId, session] of memory.entries()) {
+    if (now - session.lastSeen > MEMORY_TTL_MS) {
+      memory.delete(waId);
+    }
+  }
+}
+// Limpieza cada 10 minutos
+setInterval(cleanupOldSessions, 1000 * 60 * 10);
+
+// ======================
+// ROUTES
+// ======================
 app.get("/", (req, res) =>
-  res.send(`Bot OK ✅ | Gemini model: ${GEMINI_MODEL}`)
+  res.send(`Bot OK ✅ | Gemini: ${GEMINI_MODEL} | Memoria: RAM`)
 );
 
 app.get("/webhook", (req, res) => {
@@ -27,30 +69,33 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
-  // WhatsApp exige responder rápido 200
+  // Responder rápido 200 a Meta
   res.sendStatus(200);
 
   try {
     const entry = req.body?.entry?.[0];
     const value = entry?.changes?.[0]?.value;
-
     if (!value?.messages?.length) return;
 
     const message = value.messages[0];
     let waId = value?.contacts?.[0]?.wa_id || message.from;
-
-    // Mensaje de texto
     const textReceived = message?.text?.body || "";
 
-    // Corrección para Argentina (si te llega 549..., lo pasamos a 54...)
-    if (waId?.startsWith("549")) {
-      waId = "54" + waId.substring(3);
-    }
+    // Corrección Argentina: 549xxxxxxxxx -> 54xxxxxxxxx
+    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
 
     console.log(`📩 Mensaje de ${waId}: ${textReceived}`);
 
-    // Reglas simples antes de IA
-    const lowerText = textReceived.toLowerCase();
+    const lowerText = textReceived.toLowerCase().trim();
+
+    // Comandos para controlar memoria
+    if (lowerText === "reset" || lowerText === "reiniciar" || lowerText === "borrar memoria") {
+      memory.delete(waId);
+      await sendText(waId, "🧠✅ Listo. Borré la memoria de esta conversación.");
+      return;
+    }
+
+    // Regla simple de negocio (tu ejemplo)
     if (lowerText.includes("precio") || lowerText.includes("cuánto cuesta") || lowerText.includes("cuanto cuesta")) {
       await sendText(waId, "💰 *Nuestros Planes:*");
       await sendImage(waId, "https://picsum.photos/seed/p1/600/400", "🌟 *Plan Básico*\n$1.000");
@@ -58,49 +103,83 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Si no vino texto, no llamamos a Gemini
     if (!textReceived.trim()) {
-      await sendText(waId, "Recibí tu mensaje 🙂 ¿Podés escribirme tu consulta en texto?");
+      await sendText(waId, "🙂 ¿Podés escribirme tu consulta en texto?");
       return;
     }
 
-    const aiResponse = await askGemini(textReceived);
-    await sendText(waId, aiResponse);
+    // ======================
+    // MEMORIA: guardar conversación
+    // ======================
+    const session = getOrCreateSession(waId);
+
+    // Guardamos lo que dijo el usuario
+    session.history.push({ role: "user", text: textReceived });
+
+    // Pedimos respuesta con memoria + prompt “más largo y detallado”
+    const aiResponse = await askGeminiWithMemory(session.history);
+
+    // Guardamos respuesta del bot
+    session.history.push({ role: "model", text: aiResponse });
+
+    // Recortar historial (para costo/velocidad)
+    pruneSession(session);
+
+    // Enviar en partes si es muy largo
+    await sendLongText(waId, aiResponse);
+
   } catch (err) {
     console.error("❌ Error General Webhook:", err);
   }
 });
 
 // ======================
-// GEMINI
+// GEMINI con memoria + respuestas detalladas
 // ======================
-async function askGemini(prompt) {
+async function askGeminiWithMemory(history) {
   try {
     if (!GEMINI_API_KEY) {
-      console.error("❌ Falta GEMINI_API_KEY en variables de entorno");
-      return "Estoy sin conexión con la IA (API Key faltante). ¿En qué más puedo ayudarte? 🤖";
+      console.error("❌ Falta GEMINI_API_KEY");
+      return "Estoy sin conexión con la IA (API Key faltante).";
     }
 
-    // ✅ Modelo estable (evita -latest que suele romperse)
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    // “Sistema” + historial completo
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `
+Eres un asistente inteligente que responde en español.
+Da respuestas claras, desarrolladas y bien estructuradas.
+Si el tema lo requiere, explica en varios párrafos.
+Incluye ejemplos simples cuando ayuden.
+Si el usuario hace una pregunta ambigua, haz 1 o 2 preguntas de aclaración.
+Mantén coherencia con lo dicho anteriormente en la conversación.
+Evita respuestas excesivamente cortas: desarrolla lo necesario, sin relleno.
+`
+          }
+        ]
+      },
+      ...history.map(turn => ({
+        role: turn.role, // "user" | "model"
+        parts: [{ text: turn.text }]
+      }))
+    ];
 
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: `Responde de forma breve, amable y en español. Usuario: ${prompt}` }
-            ],
-          },
-        ],
-        // Opcional: baja un poco “randomness”
+        contents,
         generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 300,
-        },
-      }),
+          temperature: 0.8,
+          maxOutputTokens: 1500,
+          topP: 0.9
+        }
+      })
     });
 
     const data = await response.json();
@@ -109,19 +188,15 @@ async function askGemini(prompt) {
       console.error("❌ Error API Google:", {
         status: response.status,
         statusText: response.statusText,
-        error: data?.error,
+        error: data?.error
       });
-
-      // Mensaje amable al usuario
-      return "Hola! Mi IA tuvo un problema al responder 😅 ¿Podés intentar de nuevo en un minuto?";
+      return "Tuve un problema al responder 😅 ¿Querés intentar otra vez?";
     }
 
-    const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-
-    return text || "Recibí tu mensaje, pero no pude generar una respuesta clara.";
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+      || "No pude generar una respuesta clara esta vez.";
   } catch (error) {
-    console.error("❌ Error en askGemini:", error);
+    console.error("❌ Error en askGeminiWithMemory:", error);
     return "Hubo un error al procesar tu mensaje. 🧠🔄";
   }
 }
@@ -147,7 +222,7 @@ async function sendText(to, text) {
   });
 
   if (!r.ok) {
-    const err = await safeJson(r);
+    const err = await safeRead(r);
     console.error("❌ sendText error:", r.status, err);
   }
 }
@@ -162,29 +237,4 @@ async function sendImage(to, imageUrl, caption) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "image",
-      image: { link: imageUrl, caption },
-    }),
-  });
-
-  if (!r.ok) {
-    const err = await safeJson(r);
-    console.error("❌ sendImage error:", r.status, err);
-  }
-}
-
-async function safeJson(response) {
-  try {
-    return await response.json();
-  } catch {
-    return await response.text();
-  }
-}
-
-// ======================
-// START SERVER
-// ======================
-const port = process.env.PORT || 1000;
-app.listen(port, () => console.log(`🚀 Server on port ${port}`));
+      messaging_product: "w_
