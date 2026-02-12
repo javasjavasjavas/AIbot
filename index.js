@@ -19,18 +19,18 @@ const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onre
 // Modelos
 const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
 
-// Forzar que NO sea preview
+// Forzar no-preview
 const ENV_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "";
 const GEMINI_IMAGE_MODEL = ENV_IMAGE_MODEL.toLowerCase().includes("preview")
   ? "gemini-2.5-flash-image"
   : (ENV_IMAGE_MODEL || "gemini-2.5-flash-image");
 
-// Opcionales (si querés mandar tus imágenes de planes/clases)
+// Opcionales
 const PLANS_IMAGE_URL = process.env.PLANS_IMAGE_URL || "";
 const CLASSES_IMAGE_URL = process.env.CLASSES_IMAGE_URL || "";
 
-// Logs
-const LOG_LEVEL = process.env.LOG_LEVEL || "info"; // info | debug | quiet
+// Logs: info | debug | quiet
+const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 // ======================
 // STORAGE IMÁGENES
@@ -58,7 +58,7 @@ app.get("/health", (req, res) => {
 });
 
 // ======================
-// HELPERS
+// LOG HELPERS
 // ======================
 function logInfo(...args) {
   if (LOG_LEVEL === "quiet") return;
@@ -72,6 +72,9 @@ function logError(...args) {
   console.error(...args);
 }
 
+// ======================
+// GENERAL HELPERS
+// ======================
 function normalizeText(s) {
   return (s || "")
     .toLowerCase()
@@ -85,7 +88,11 @@ function sleep(ms) {
 }
 
 async function safeRead(r) {
-  try { return await r.json(); } catch { return await r.text(); }
+  try {
+    return await r.json();
+  } catch {
+    return await r.text();
+  }
 }
 
 function extractRetryDelaySeconds(errObj) {
@@ -151,10 +158,6 @@ async function sendImage(to, imageUrl, caption) {
   }
 }
 
-/**
- * WhatsApp corta alrededor de 4096 chars.
- * Usamos margen y numeramos partes para que el usuario entienda continuidad.
- */
 async function sendLongText(to, text, chunkSize = 2800) {
   const clean = (text || "").trim();
   if (!clean) return;
@@ -165,16 +168,17 @@ async function sendLongText(to, text, chunkSize = 2800) {
   }
 
   const chunks = [];
-  for (let i = 0; i < clean.length; i += chunkSize) chunks.push(clean.slice(i, i + chunkSize));
+  for (let i = 0; i < clean.length; i += chunkSize) {
+    chunks.push(clean.slice(i, i + chunkSize));
+  }
 
   for (let idx = 0; idx < chunks.length; idx++) {
-    const header = `(${idx + 1}/${chunks.length}) `;
-    await sendText(to, header + chunks[idx]);
+    await sendText(to, `(${idx + 1}/${chunks.length}) ${chunks[idx]}`);
   }
 }
 
 // ======================
-// INTENTS: PRECIOS / CLASES / EJERCICIOS
+// INTENTS
 // ======================
 function isAskingPrices(text) {
   const t = normalizeText(text);
@@ -203,32 +207,24 @@ function formatPlansText() {
   );
 }
 
-// Si querés, después lo conectamos con tu grilla real
 function isAskingClasses(text) {
   const t = normalizeText(text);
   return t.includes("clase") || t.includes("clases") || t.includes("horario") || t.includes("horarios");
 }
 
-// ✅ Esto arregla el caso “vuelos laterales”: no estaba en tu lista
 const EXERCISE_KEYWORDS = [
   "press banca", "press de banca", "press pecho", "press militar",
   "sentadilla", "peso muerto", "dominadas", "remo", "curl",
-  "hip thrust", "plancha", "vuelos laterales", "elevaciones laterales",
-  "elevacion lateral", "elevaciones laterales", "laterales", "hombros",
-  "abdominales", "zancadas", "estocadas", "gemelos"
+  "hip thrust", "plancha",
+  "vuelos laterales", "elevaciones laterales", "elevacion lateral", "laterales",
+  "hombros", "abdominales", "zancadas", "estocadas", "gemelos"
 ];
 
 function wantsImage(text) {
   const t = normalizeText(text);
-  return t.includes("imagen") || t.includes("foto") || t.includes("grafico") || t.includes("gráfico") || t.includes("descriptiva");
+  return t.includes("imagen") || t.includes("foto") || t.includes("descriptiva") || t.includes("grafico") || t.includes("gráfico");
 }
 
-/**
- * Intención ejercicio:
- * - si contiene keywords de ejercicio, o
- * - si pregunta “cómo hacer” + algo del gimnasio, o
- * - si pide “imagen” y menciona una parte del cuerpo común
- */
 function isExerciseIntent(text) {
   const t = normalizeText(text);
   if (EXERCISE_KEYWORDS.some(k => t.includes(normalizeText(k)))) return true;
@@ -237,7 +233,6 @@ function isExerciseIntent(text) {
   const doIt = t.includes("hacer") || t.includes("se hace") || t.includes("realizar");
   const bodyParts = ["hombro", "pecho", "espalda", "pierna", "biceps", "bíceps", "triceps", "tríceps", "gluteo", "glúteo", "abdomen", "core"];
   const mentionsBody = bodyParts.some(b => t.includes(normalizeText(b)));
-
   if ((howTo && doIt) && mentionsBody) return true;
   if (wantsImage(text) && mentionsBody) return true;
 
@@ -269,12 +264,6 @@ IMPORTANTE:
 `;
 }
 
-/**
- * Prompt universal sin hardcode por ejercicio:
- * - Sin texto (para evitar inglés)
- * - Dos paneles
- * - “interpretar” el movimiento y elegir dos fases clave
- */
 function buildExerciseImagePrompt(exerciseQuery) {
   return `
 Ilustración técnica instructiva del ejercicio: "${exerciseQuery}"
@@ -303,7 +292,7 @@ NO TEXTO. NO INGLÉS. NO ETIQUETAS.
 }
 
 // ======================
-// GEMINI TEXT (retry básico)
+// GEMINI TEXT
 // ======================
 async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
   if (!GEMINI_API_KEY) return "⚠️ Falta GEMINI_API_KEY en el servidor.";
@@ -316,19 +305,14 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 1800, // más largo
-          topP: 0.9
-        }
+        generationConfig: { temperature: 0.7, maxOutputTokens: 1800, topP: 0.9 }
       })
     });
 
     const data = await safeRead(response);
 
     if (response.ok && !data?.error) {
-      const out = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      return out || "No pude generar una respuesta clara.";
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No pude generar una respuesta clara.";
     }
 
     const code = data?.error?.code || response.status;
@@ -347,7 +331,8 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
 }
 
 // ======================
-// GEMINI IMAGE
+// GEMINI IMAGE (ESTA PARTE ES LA QUE SE TE ROMPIÓ)
+// ✅ Acá está correctamente cerrada: [] y {} y ().
 // ======================
 async function generateExerciseImageAndSave(imagePrompt) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
@@ -357,4 +342,128 @@ async function generateExerciseImageAndSave(imagePrompt) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: image]()]()
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [{ text: imagePrompt }]
+        }
+      ]
+    })
+  });
+
+  const data = await safeRead(response);
+
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error?.message || `Image gen failed (${response.status})`);
+  }
+
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const inline = parts.find((p) => p.inlineData?.data);
+  const b64 = inline?.inlineData?.data;
+  if (!b64) throw new Error("No inline image data returned");
+
+  const buffer = Buffer.from(b64, "base64");
+  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
+  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
+
+  return filename;
+}
+
+// ======================
+// WEBHOOK VERIFY
+// ======================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    logInfo("✅ Webhook verificado OK");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// ======================
+// WEBHOOK POST
+// ======================
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const value = entry?.changes?.[0]?.value;
+
+    // Ignorar statuses (ruido)
+    if (!value?.messages?.length) {
+      if (LOG_LEVEL === "debug" && value?.statuses?.length) {
+        logDebug("ℹ️ status event:", value.statuses?.[0]?.status);
+      }
+      return;
+    }
+
+    const message = value.messages[0];
+    let waId = value?.contacts?.[0]?.wa_id || message.from;
+
+    // Argentina 549 -> 54
+    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
+
+    const text = message?.text?.body || "";
+    if (!text.trim()) return;
+
+    logInfo(`📩 ${waId}: ${text}`);
+
+    // PRECIOS
+    if (isAskingPrices(text)) {
+      await sendLongText(waId, formatPlansText());
+      if (PLANS_IMAGE_URL) await sendImage(waId, PLANS_IMAGE_URL, "Planes disponibles");
+      return;
+    }
+
+    // CLASES
+    if (isAskingClasses(text)) {
+      await sendText(waId, "📅 Decime qué clase te interesa y te paso horarios.");
+      if (CLASSES_IMAGE_URL) await sendImage(waId, CLASSES_IMAGE_URL, "Grilla de clases");
+      return;
+    }
+
+    // EJERCICIO + IMAGEN SI LA PIDE
+    if (isExerciseIntent(text)) {
+      const explanation = await askGeminiTextWithRetry(buildCoachPrompt(text));
+      await sendLongText(waId, explanation);
+
+      if (wantsImage(text)) {
+        try {
+          await sendText(waId, "🖼️ Generando imagen descriptiva...");
+          const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
+          const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+          logInfo("🖼️ Image URL:", imgUrl);
+          await sendImage(waId, imgUrl, "✅ Ejecución correcta (referencia)");
+        } catch (e) {
+          logError("❌ Error generando imagen:", e?.message || e);
+          await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló. Probá de nuevo en 1 minuto.");
+        }
+      }
+      return;
+    }
+
+    // DEFAULT
+    const reply = await askGeminiTextWithRetry(
+      `Sos un asistente de gimnasio. Responde en español, claro y útil.\nUsuario: ${text}`
+    );
+    await sendLongText(waId, reply);
+
+  } catch (err) {
+    logError("❌ Error webhook:", err);
+  }
+});
+
+// ======================
+// START
+// ======================
+const port = process.env.PORT || 1000;
+app.listen(port, "0.0.0.0", () => {
+  logInfo(`🚀 Server on port ${port}`);
+  logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
+  logInfo("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
+});
