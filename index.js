@@ -33,6 +33,13 @@ const CLASSES_IMAGE_URL = process.env.CLASSES_IMAGE_URL || "";
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 // ======================
+// MEMORY (RAM)
+// ======================
+// Guarda el último ejercicio por usuario. OJO: en Render free puede reiniciarse.
+// Para persistente, luego lo pasamos a Redis/Supabase.
+const lastExerciseByUser = new Map(); // waId -> string
+
+// ======================
 // STORAGE IMÁGENES
 // ======================
 const GENERATED_DIR = path.join(process.cwd(), "generated");
@@ -88,11 +95,7 @@ function sleep(ms) {
 }
 
 async function safeRead(r) {
-  try {
-    return await r.json();
-  } catch {
-    return await r.text();
-  }
+  try { return await r.json(); } catch { return await r.text(); }
 }
 
 function extractRetryDelaySeconds(errObj) {
@@ -107,6 +110,57 @@ function extractRetryDelaySeconds(errObj) {
   } catch {
     return null;
   }
+}
+
+// Quita markdown pesado que WhatsApp “rompe”
+function whatsappSafeText(text) {
+  return (text || "")
+    .replace(/###/g, "")        // headings
+    .replace(/\*\*/g, "*")      // bold doble
+    .replace(/```[\s\S]*?```/g, "") // code blocks
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
+// Split por párrafos y oraciones (más estable que por chars)
+function splitForWhatsApp(text, maxLen = 2600) {
+  const t = whatsappSafeText(text);
+  if (t.length <= maxLen) return [t];
+
+  const paragraphs = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+
+  const parts = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (current.trim()) parts.push(current.trim());
+    current = "";
+  };
+
+  for (const p of paragraphs) {
+    // si un párrafo solo ya es enorme, lo partimos por oraciones
+    if (p.length > maxLen) {
+      const sentences = p.split(/(?<=[.!?])\s+/);
+      for (const s of sentences) {
+        if ((current + " " + s).trim().length > maxLen) pushCurrent();
+        current = (current ? current + " " : "") + s;
+      }
+      pushCurrent();
+      continue;
+    }
+
+    // caso normal: unir párrafos hasta maxLen
+    const candidate = (current ? current + "\n\n" : "") + p;
+    if (candidate.length > maxLen) {
+      pushCurrent();
+      current = p;
+    } else {
+      current = candidate;
+    }
+  }
+
+  pushCurrent();
+  return parts.length ? parts : [t.slice(0, maxLen)];
 }
 
 // ======================
@@ -158,22 +212,14 @@ async function sendImage(to, imageUrl, caption) {
   }
 }
 
-async function sendLongText(to, text, chunkSize = 2800) {
-  const clean = (text || "").trim();
-  if (!clean) return;
-
-  if (clean.length <= chunkSize) {
-    await sendText(to, clean);
+async function sendLongText(to, text) {
+  const chunks = splitForWhatsApp(text, 2600);
+  if (chunks.length === 1) {
+    await sendText(to, chunks[0]);
     return;
   }
-
-  const chunks = [];
-  for (let i = 0; i < clean.length; i += chunkSize) {
-    chunks.push(clean.slice(i, i + chunkSize));
-  }
-
-  for (let idx = 0; idx < chunks.length; idx++) {
-    await sendText(to, `(${idx + 1}/${chunks.length}) ${chunks[idx]}`);
+  for (let i = 0; i < chunks.length; i++) {
+    await sendText(to, `(${i + 1}/${chunks.length}) ${chunks[i]}`);
   }
 }
 
@@ -197,13 +243,13 @@ function isAskingPrices(text) {
 
 function formatPlansText() {
   return (
-    "💳 *Planes disponibles:*\n\n" +
-    "🖤 *Plan Black* — *$42.990/mes*\n" +
-    "• 12 meses de fidelidad\n• Inscripción gratis\n• Peso libre + cardio + clases\n• Acceso LatAm\n• Smart Fit app\n• 5 pases/mes\n• Sillones de masaje\n\n" +
-    "💪 *Plan Fit* — *$34.990/mes*\n" +
-    "• 12 meses de fidelidad\n• Inscripción gratis\n• Peso libre + cardio + clases\n• Smart Fit app\n\n" +
-    "🧠 *Plan Smart* — *$39.990/mes*\n" +
-    "• Sin fidelidad\n• Inscripción gratis\n• Peso libre + cardio + clases\n• Smart Fit app\n• *Sin permanencia mínima*\n"
+    "Planes disponibles:\n\n" +
+    "Plan Black — $42.990/mes\n" +
+    "- 12 meses de fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- Acceso LatAm\n- App\n- 5 pases/mes\n- Sillones de masaje\n\n" +
+    "Plan Fit — $34.990/mes\n" +
+    "- 12 meses de fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- App\n\n" +
+    "Plan Smart — $39.990/mes\n" +
+    "- Sin fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- App\n- Sin permanencia mínima\n"
   );
 }
 
@@ -233,34 +279,31 @@ function isExerciseIntent(text) {
   const doIt = t.includes("hacer") || t.includes("se hace") || t.includes("realizar");
   const bodyParts = ["hombro", "pecho", "espalda", "pierna", "biceps", "bíceps", "triceps", "tríceps", "gluteo", "glúteo", "abdomen", "core"];
   const mentionsBody = bodyParts.some(b => t.includes(normalizeText(b)));
-  if ((howTo && doIt) && mentionsBody) return true;
-  if (wantsImage(text) && mentionsBody) return true;
 
+  if ((howTo && doIt) && mentionsBody) return true;
   return false;
 }
 
 // ======================
-// PROMPTS
+// PROMPTS (WhatsApp-friendly)
 // ======================
 function buildCoachPrompt(userText) {
   return `
-Actúa como PROFESOR/A DE GIMNASIO (entrenador personal).
-Responde en español, claro, amable y profesional.
+Actúa como entrenador personal.
+Responde en español, claro, práctico y sin markdown (sin ###).
 
 El usuario pregunta: "${userText}"
 
-Estructura obligatoria:
-1) Qué trabaja (músculos principales y secundarios).
-2) Técnica paso a paso (lista numerada).
-3) 5 errores comunes y cómo corregirlos.
-4) Respiración y ritmo.
-5) Variantes (principiante / intermedio / avanzado).
-6) Consejos de seguridad (cuándo parar).
-7) Ejemplo de rutina corta.
+Formato de respuesta:
+- Qué trabaja (principal y secundarios)
+- Técnica paso a paso (1 a 6)
+- Errores comunes (5) + corrección
+- Respiración y ritmo
+- Variantes (principiante/intermedio/avanzado)
+- Seguridad (cuándo parar)
+- Mini rutina ejemplo
 
-IMPORTANTE:
-- NO digas que “no puedes mostrar imágenes”.
-- Si el usuario pide imagen, asumí que se generará aparte.
+No digas que no puedes mostrar imágenes.
 `;
 }
 
@@ -268,26 +311,19 @@ function buildExerciseImagePrompt(exerciseQuery) {
   return `
 Ilustración técnica instructiva del ejercicio: "${exerciseQuery}"
 
-REQUISITOS VISUALES:
-- Fondo completamente blanco.
-- Estilo ilustración limpia tipo manual de entrenamiento.
-- Sin texto, sin títulos, sin etiquetas, sin letras, sin números (prohibido).
-- Sin marcas de agua ni logos.
-- Dos paneles apilados verticalmente separados por una línea fina.
-- Misma persona, mismo ángulo de cámara, misma distancia, ambos paneles coherentes.
+REQUISITOS:
+- Fondo blanco puro.
+- Estilo ilustración limpia tipo manual.
+- Sin texto, sin letras, sin números, sin etiquetas.
+- Dos paneles verticales separados por línea fina.
+- Misma persona, mismo ángulo, coherente.
+- Técnica correcta y segura, alineación articular correcta.
+- Evitar errores típicos.
 
-INTERPRETACIÓN DEL MOVIMIENTO:
-1) Analiza el ejercicio y determina automáticamente:
-   - Una posición inicial estable y segura.
-   - Una posición de mayor recorrido (máxima flexión / máxima contracción) correcta.
-2) Respeta técnica estándar de gimnasio:
-   - Alineación articular correcta.
-   - Muñecas neutras alineadas con antebrazos.
-   - Columna neutra/segura según el ejercicio.
-   - Escápulas/torso/pies correctamente colocados si aplica.
-3) Evita errores típicos del ejercicio.
+El panel 1 muestra una posición inicial estable.
+El panel 2 muestra la posición de mayor recorrido/contracción correcta.
 
-NO TEXTO. NO INGLÉS. NO ETIQUETAS.
+NO TEXTO. NO INGLÉS.
 `;
 }
 
@@ -295,7 +331,7 @@ NO TEXTO. NO INGLÉS. NO ETIQUETAS.
 // GEMINI TEXT
 // ======================
 async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
-  if (!GEMINI_API_KEY) return "⚠️ Falta GEMINI_API_KEY en el servidor.";
+  if (!GEMINI_API_KEY) return "Falta configurar GEMINI_API_KEY en el servidor.";
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -305,7 +341,11 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1800, topP: 0.9 }
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1400, // largo pero controlado
+          topP: 0.9
+        }
       })
     });
 
@@ -324,15 +364,14 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
     }
 
     logError("❌ Gemini text error:", code, data?.error?.message || data);
-    return "Tuve un problema al responder 😅. Probá de nuevo en un momento.";
+    return "Tuve un problema al responder. Probá de nuevo en un momento.";
   }
 
-  return "Estoy con mucha demanda ahora 😅. Probá en un minuto.";
+  return "Estoy con mucha demanda ahora. Probá en un minuto.";
 }
 
 // ======================
-// GEMINI IMAGE (ESTA PARTE ES LA QUE SE TE ROMPIÓ)
-// ✅ Acá está correctamente cerrada: [] y {} y ().
+// GEMINI IMAGE
 // ======================
 async function generateExerciseImageAndSave(imagePrompt) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
@@ -343,11 +382,7 @@ async function generateExerciseImageAndSave(imagePrompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: imagePrompt }]
-        }
-      ]
+      contents: [{ parts: [{ text: imagePrompt }] }]
     })
   });
 
@@ -358,112 +393,4 @@ async function generateExerciseImageAndSave(imagePrompt) {
   }
 
   const parts = data?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.find((p) => p.inlineData?.data);
-  const b64 = inline?.inlineData?.data;
-  if (!b64) throw new Error("No inline image data returned");
-
-  const buffer = Buffer.from(b64, "base64");
-  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
-  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
-
-  return filename;
-}
-
-// ======================
-// WEBHOOK VERIFY
-// ======================
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    logInfo("✅ Webhook verificado OK");
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
-});
-
-// ======================
-// WEBHOOK POST
-// ======================
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-
-  try {
-    const entry = req.body?.entry?.[0];
-    const value = entry?.changes?.[0]?.value;
-
-    // Ignorar statuses (ruido)
-    if (!value?.messages?.length) {
-      if (LOG_LEVEL === "debug" && value?.statuses?.length) {
-        logDebug("ℹ️ status event:", value.statuses?.[0]?.status);
-      }
-      return;
-    }
-
-    const message = value.messages[0];
-    let waId = value?.contacts?.[0]?.wa_id || message.from;
-
-    // Argentina 549 -> 54
-    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
-
-    const text = message?.text?.body || "";
-    if (!text.trim()) return;
-
-    logInfo(`📩 ${waId}: ${text}`);
-
-    // PRECIOS
-    if (isAskingPrices(text)) {
-      await sendLongText(waId, formatPlansText());
-      if (PLANS_IMAGE_URL) await sendImage(waId, PLANS_IMAGE_URL, "Planes disponibles");
-      return;
-    }
-
-    // CLASES
-    if (isAskingClasses(text)) {
-      await sendText(waId, "📅 Decime qué clase te interesa y te paso horarios.");
-      if (CLASSES_IMAGE_URL) await sendImage(waId, CLASSES_IMAGE_URL, "Grilla de clases");
-      return;
-    }
-
-    // EJERCICIO + IMAGEN SI LA PIDE
-    if (isExerciseIntent(text)) {
-      const explanation = await askGeminiTextWithRetry(buildCoachPrompt(text));
-      await sendLongText(waId, explanation);
-
-      if (wantsImage(text)) {
-        try {
-          await sendText(waId, "🖼️ Generando imagen descriptiva...");
-          const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
-          const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
-          logInfo("🖼️ Image URL:", imgUrl);
-          await sendImage(waId, imgUrl, "✅ Ejecución correcta (referencia)");
-        } catch (e) {
-          logError("❌ Error generando imagen:", e?.message || e);
-          await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló. Probá de nuevo en 1 minuto.");
-        }
-      }
-      return;
-    }
-
-    // DEFAULT
-    const reply = await askGeminiTextWithRetry(
-      `Sos un asistente de gimnasio. Responde en español, claro y útil.\nUsuario: ${text}`
-    );
-    await sendLongText(waId, reply);
-
-  } catch (err) {
-    logError("❌ Error webhook:", err);
-  }
-});
-
-// ======================
-// START
-// ======================
-const port = process.env.PORT || 1000;
-app.listen(port, "0.0.0.0", () => {
-  logInfo(`🚀 Server on port ${port}`);
-  logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
-  logInfo("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
-});
+  const inline = parts.find((p) => p.in
