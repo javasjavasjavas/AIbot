@@ -248,15 +248,43 @@ Sé detallado pero fácil de leer.
 
 function buildExerciseImagePrompt(exerciseQuery) {
   return `
-Create a clean instructional fitness illustration showing correct execution of:
-"${exerciseQuery}"
+Ilustración técnica instructiva del ejercicio: "${exerciseQuery}"
 
-Style:
-- White background
-- Two-panel layout: Start position and End position
-- Neutral gym clothing, no logos
-- Correct posture, alignment, range of motion
-- No text, no labels, no watermark
+OBJETIVO:
+Mostrar la ejecución correcta del movimiento en dos fases clave.
+
+INSTRUCCIONES OBLIGATORIAS:
+
+- Fondo completamente blanco.
+- Estilo ilustración limpia tipo manual de entrenamiento.
+- Sin texto, sin títulos, sin etiquetas, sin letras, sin números.
+- Sin marcas de agua.
+- Misma persona, mismo ángulo de cámara en ambos paneles.
+- Dos paneles apilados verticalmente separados por una línea fina.
+
+INTERPRETACIÓN DEL MOVIMIENTO:
+
+1. Analiza el ejercicio y determina automáticamente:
+   - La posición de inicio biomecánicamente correcta.
+   - La posición de máxima contracción o máxima flexión del movimiento.
+
+2. Representa:
+   - Panel superior: fase inicial estable del movimiento.
+   - Panel inferior: fase de mayor recorrido o contracción.
+
+3. Debe respetar:
+   - Alineación articular correcta.
+   - Postura segura.
+   - Técnica estándar de gimnasio.
+   - Muñecas alineadas.
+   - Columna neutra o adecuada al ejercicio.
+   - Activación correcta de la cadena muscular principal.
+
+4. Evitar errores comunes del ejercicio.
+
+NO AGREGAR TEXTO.
+NO USAR INGLÉS.
+NO INCLUIR ETIQUETAS.
 `;
 }
 
