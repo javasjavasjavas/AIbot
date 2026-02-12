@@ -393,4 +393,134 @@ async function generateExerciseImageAndSave(imagePrompt) {
   }
 
   const parts = data?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.find((p) => p.in
+  const inline = parts.find((p) => p.inlineData?.data);
+  const b64 = inline?.inlineData?.data;
+  if (!b64) throw new Error("No inline image data returned");
+
+  const buffer = Buffer.from(b64, "base64");
+  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
+  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
+
+  return filename;
+}
+
+// ======================
+// WEBHOOK VERIFY
+// ======================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    logInfo("✅ Webhook verificado OK");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// ======================
+// WEBHOOK POST
+// ======================
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const value = entry?.changes?.[0]?.value;
+
+    if (!value?.messages?.length) return;
+
+    const message = value.messages[0];
+    let waId = value?.contacts?.[0]?.wa_id || message.from;
+
+    // Argentina 549 -> 54
+    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
+
+    const text = message?.text?.body || "";
+    if (!text.trim()) return;
+
+    logInfo(`📩 ${waId}: ${text}`);
+
+    // 1) PRECIOS
+    if (isAskingPrices(text)) {
+      await sendLongText(waId, formatPlansText());
+      if (PLANS_IMAGE_URL) await sendImage(waId, PLANS_IMAGE_URL, "Planes disponibles");
+      return;
+    }
+
+    // 2) CLASES
+    if (isAskingClasses(text)) {
+      await sendText(waId, "Decime qué clase te interesa (Funcional / Zumba / etc.) y te paso días y horarios.");
+      if (CLASSES_IMAGE_URL) await sendImage(waId, CLASSES_IMAGE_URL, "Grilla de clases");
+      return;
+    }
+
+    // 3) SI PIDE IMAGEN PERO NO DICE EJERCICIO → usar último
+    if (wantsImage(text) && !isExerciseIntent(text)) {
+      const last = lastExerciseByUser.get(waId);
+      if (!last) {
+        await sendText(waId, "Dale. Decime el ejercicio exacto (por ejemplo: 'vuelos laterales') y te genero la imagen.");
+        return;
+      }
+
+      try {
+        await sendText(waId, `Perfecto. Genero la imagen de: ${last}`);
+        const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(last));
+        const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+        logInfo("🖼️ Image URL:", imgUrl);
+        await sendImage(waId, imgUrl, "Ejecución correcta (referencia)");
+      } catch (e) {
+        logError("❌ Error generando imagen:", e?.message || e);
+        await sendText(waId, "La imagen falló. Probá de nuevo en 1 minuto.");
+      }
+      return;
+    }
+
+    // 4) EJERCICIOS
+    if (isExerciseIntent(text)) {
+      // Guardar memoria del último ejercicio (texto original para mejor contexto)
+      lastExerciseByUser.set(waId, text);
+
+      const explanation = await askGeminiTextWithRetry(buildCoachPrompt(text));
+      await sendLongText(waId, explanation);
+
+      if (wantsImage(text)) {
+        try {
+          await sendText(waId, "Generando imagen descriptiva...");
+          const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
+          const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+          logInfo("🖼️ Image URL:", imgUrl);
+          await sendImage(waId, imgUrl, "Ejecución correcta (referencia)");
+        } catch (e) {
+          logError("❌ Error generando imagen:", e?.message || e);
+          await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló. Probá de nuevo en 1 minuto.");
+        }
+      } else {
+        // CTA: ofrecer imagen
+        await sendText(waId, "Si querés, decime 'mostrame una imagen' y te genero una imagen descriptiva del ejercicio.");
+      }
+
+      return;
+    }
+
+    // 5) DEFAULT
+    const reply = await askGeminiTextWithRetry(
+      `Sos un asistente de gimnasio. Responde en español, claro y útil, sin markdown.\nUsuario: ${text}`
+    );
+    await sendLongText(waId, reply);
+
+  } catch (err) {
+    logError("❌ Error webhook:", err);
+  }
+});
+
+// ======================
+// START
+// ======================
+const port = process.env.PORT || 1000;
+app.listen(port, "0.0.0.0", () => {
+  logInfo(`🚀 Server on port ${port}`);
+  logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
+  logInfo("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
+});
