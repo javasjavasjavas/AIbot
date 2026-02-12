@@ -16,22 +16,35 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onrender.com").replace(/\/$/, "");
 
+// Modelos
 const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
-const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
 
+// Forzar no-preview
+const ENV_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "";
+const GEMINI_IMAGE_MODEL = ENV_IMAGE_MODEL.toLowerCase().includes("preview")
+  ? "gemini-2.5-flash-image"
+  : (ENV_IMAGE_MODEL || "gemini-2.5-flash-image");
+
+// Opcionales
+const PLANS_IMAGE_URL = process.env.PLANS_IMAGE_URL || "";
+const CLASSES_IMAGE_URL = process.env.CLASSES_IMAGE_URL || "";
+
+// Logs: info | debug | quiet
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 // ======================
 // MEMORY (RAM)
 // ======================
-const lastExerciseByUser = new Map();
-const userState = new Map();
+const lastExerciseByUser = new Map(); // waId -> string
+
+// Estado conversación (menu/gym/nutrition)
+const userState = new Map(); // waId -> { flow, nutritionStep, nutritionProfile }
 
 function getState(waId) {
   if (!userState.has(waId)) {
     userState.set(waId, {
-      flow: "menu",
-      nutritionStep: null,
+      flow: "menu", // menu | gym | nutrition
+      nutritionStep: null, // gender | age | weight | done
       nutritionProfile: { gender: null, age: null, weightKg: null }
     });
   }
@@ -54,7 +67,41 @@ if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true
 app.use("/img", express.static(GENERATED_DIR));
 
 // ======================
-// HELPERS
+// ROUTES
+// ======================
+app.get("/", (req, res) => res.send("✅ Gym Coach Bot ONLINE"));
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    publicBaseUrl: PUBLIC_BASE_URL,
+    models: { text: GEMINI_TEXT_MODEL, image: GEMINI_IMAGE_MODEL },
+    env: {
+      hasVerifyToken: !!VERIFY_TOKEN,
+      hasWhatsappToken: !!WHATSAPP_TOKEN,
+      hasPhoneNumberId: !!PHONE_NUMBER_ID,
+      hasGeminiKey: !!GEMINI_API_KEY
+    }
+  });
+});
+
+// ======================
+// LOG HELPERS
+// ======================
+function logInfo(...args) {
+  if (LOG_LEVEL === "quiet") return;
+  console.log(...args);
+}
+function logDebug(...args) {
+  if (LOG_LEVEL !== "debug") return;
+  console.log(...args);
+}
+function logError(...args) {
+  console.error(...args);
+}
+
+// ======================
+// GENERAL HELPERS
 // ======================
 function normalizeText(s) {
   return (s || "")
@@ -64,40 +111,84 @@ function normalizeText(s) {
     .trim();
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function safeRead(r) {
+  try { return await r.json(); } catch { return await r.text(); }
+}
+
+function extractRetryDelaySeconds(errObj) {
+  try {
+    const details = errObj?.details;
+    if (!Array.isArray(details)) return null;
+    const retryInfo = details.find((d) => d["@type"]?.includes("RetryInfo"));
+    const s = retryInfo?.retryDelay;
+    if (!s) return null;
+    if (typeof s === "string" && s.endsWith("s")) return Number(s.replace("s", ""));
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Quita markdown pesado que WhatsApp “rompe”
 function whatsappSafeText(text) {
   return (text || "")
     .replace(/###/g, "")
     .replace(/\*\*/g, "*")
     .replace(/```[\s\S]*?```/g, "")
+    .replace(/[ \t]+\n/g, "\n")
     .trim();
 }
 
+// Split por párrafos y oraciones (más estable que por chars)
 function splitForWhatsApp(text, maxLen = 2600) {
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
 
+  const paragraphs = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+
   const parts = [];
   let current = "";
 
-  const paragraphs = t.split(/\n\s*\n/);
+  const pushCurrent = () => {
+    if (current.trim()) parts.push(current.trim());
+    current = "";
+  };
 
   for (const p of paragraphs) {
-    if ((current + p).length > maxLen) {
-      parts.push(current);
+    if (p.length > maxLen) {
+      const sentences = p.split(/(?<=[.!?])\s+/);
+      for (const s of sentences) {
+        if ((current + " " + s).trim().length > maxLen) pushCurrent();
+        current = (current ? current + " " : "") + s;
+      }
+      pushCurrent();
+      continue;
+    }
+
+    const candidate = (current ? current + "\n\n" : "") + p;
+    if (candidate.length > maxLen) {
+      pushCurrent();
       current = p;
     } else {
-      current += "\n\n" + p;
+      current = candidate;
     }
   }
 
-  if (current.trim()) parts.push(current.trim());
-  return parts;
+  pushCurrent();
+  return parts.length ? parts : [t.slice(0, maxLen)];
 }
 
+// ======================
+// WHATSAPP SENDERS (con logs de error)
+// ======================
 async function sendText(to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
-  await fetch(url, {
+  const r = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
@@ -110,197 +201,558 @@ async function sendText(to, text) {
       text: { body: text }
     })
   });
+
+  if (!r.ok) {
+    const body = await safeRead(r);
+    logError("❌ sendText failed:", r.status, body);
+  } else {
+    logDebug("✅ sendText ok ->", to, "len:", (text || "").length);
+  }
+}
+
+async function sendImage(to, imageUrl, caption) {
+  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "image",
+      image: { link: imageUrl, caption }
+    })
+  });
+
+  if (!r.ok) {
+    const body = await safeRead(r);
+    logError("❌ sendImage failed:", r.status, body, "URL:", imageUrl);
+  } else {
+    logDebug("✅ sendImage ok ->", to, imageUrl);
+  }
 }
 
 async function sendLongText(to, text) {
-  const chunks = splitForWhatsApp(text);
+  const chunks = splitForWhatsApp(text, 2600);
+  if (chunks.length === 1) {
+    await sendText(to, chunks[0]);
+    return;
+  }
   for (let i = 0; i < chunks.length; i++) {
-    await sendText(to, chunks.length > 1 ? `(${i + 1}/${chunks.length}) ${chunks[i]}` : chunks[i]);
+    await sendText(to, `(${i + 1}/${chunks.length}) ${chunks[i]}`);
   }
 }
 
 // ======================
-// INTENTS
+// INTENTS GYM
+// ======================
+function isAskingPrices(text) {
+  const t = normalizeText(text);
+  return (
+    t.includes("precio") ||
+    t.includes("precios") ||
+    t.includes("planes") ||
+    t.includes("membresia") ||
+    t.includes("membresía") ||
+    t.includes("cuanto cuesta") ||
+    t.includes("cuánto cuesta") ||
+    t.includes("cuanto sale") ||
+    t.includes("valor")
+  );
+}
+
+function formatPlansText() {
+  return (
+    "Planes disponibles:\n\n" +
+    "Plan Black — $42.990/mes\n" +
+    "- 12 meses de fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- Acceso LatAm\n- App\n- 5 pases/mes\n- Sillones de masaje\n\n" +
+    "Plan Fit — $34.990/mes\n" +
+    "- 12 meses de fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- App\n\n" +
+    "Plan Smart — $39.990/mes\n" +
+    "- Sin fidelidad\n- Inscripción gratis\n- Peso libre + cardio + clases\n- App\n- Sin permanencia mínima\n"
+  );
+}
+
+function isAskingClasses(text) {
+  const t = normalizeText(text);
+  return t.includes("clase") || t.includes("clases") || t.includes("horario") || t.includes("horarios");
+}
+
+const EXERCISE_KEYWORDS = [
+  "press banca", "press de banca", "press pecho", "press militar",
+  "sentadilla", "peso muerto", "dominadas", "remo", "curl",
+  "hip thrust", "plancha",
+  "vuelos laterales", "elevaciones laterales", "elevacion lateral", "laterales",
+  "hombros", "abdominales", "zancadas", "estocadas", "gemelos"
+];
+
+function wantsImage(text) {
+  const t = normalizeText(text);
+  return t.includes("imagen") || t.includes("foto") || t.includes("descriptiva") || t.includes("grafico") || t.includes("gráfico");
+}
+
+function isExerciseIntent(text) {
+  const t = normalizeText(text);
+  if (EXERCISE_KEYWORDS.some(k => t.includes(normalizeText(k)))) return true;
+
+  const howTo = t.includes("como") || t.includes("cómo");
+  const doIt = t.includes("hacer") || t.includes("se hace") || t.includes("realizar");
+  const bodyParts = ["hombro", "pecho", "espalda", "pierna", "biceps", "bíceps", "triceps", "tríceps", "gluteo", "glúteo", "abdomen", "core"];
+  const mentionsBody = bodyParts.some(b => t.includes(normalizeText(b)));
+
+  if ((howTo && doIt) && mentionsBody) return true;
+  return false;
+}
+
+function isGymIntent(text) {
+  return isAskingPrices(text) || isAskingClasses(text) || isExerciseIntent(text) || wantsImage(text);
+}
+
+// ======================
+// INTENTS + PARSERS NUTRICIÓN
 // ======================
 function isMenuCommand(text) {
   const t = normalizeText(text);
-  return t === "menu" || t === "menú" || t === "inicio";
+  return t === "menu" || t === "menú" || t === "inicio" || t === "start";
 }
 
 function isNutritionIntent(text) {
   const t = normalizeText(text);
 
-  const phrases = [
-    "bajar de peso", "perder peso", "bajar grasa",
-    "dieta", "calorias", "calorías",
-    "macros", "proteina", "proteína",
-    "volumen", "definicion", "definición",
-    "masa muscular", "ganar musculo"
+  const strongPhrases = [
+    "bajar de peso", "perder peso", "bajar grasa", "perder grasa",
+    "definicion", "definición", "cut", "cutting",
+    "volumen", "bulk", "bulking",
+    "dieta", "comida", "alimentacion", "alimentación",
+    "calorias", "calorías", "macros", "proteina", "proteína",
+    "carbo", "carbos", "carbohidrato", "carbohidratos",
+    "grasa", "grasas",
+    "ayuno", "intermitente",
+    "masa muscular", "ganar musculo", "ganar músculo",
+    "suplemento", "suplementos", "creatina", "whey"
   ];
 
-  if (phrases.some(p => t.includes(p))) return true;
+  if (strongPhrases.some(p => t.includes(p))) return true;
 
-  if (t.includes("quiero") && (t.includes("bajar") || t.includes("definir") || t.includes("volumen")))
-    return true;
+  const wants = t.includes("quiero") || t.includes("necesito") || t.includes("me gustaria") || t.includes("me gustaría");
+  const goalWords = ["bajar", "perder", "definir", "marcar", "volumen", "musculo", "músculo"];
+  if (wants && goalWords.some(g => t.includes(g))) return true;
 
   return false;
 }
 
-function isExerciseIntent(text) {
+function parseGender(text) {
   const t = normalizeText(text);
-  return t.includes("press") ||
-    t.includes("sentadilla") ||
-    t.includes("peso muerto") ||
-    t.includes("dominadas") ||
-    t.includes("remo") ||
-    t.includes("curl");
+  if (t.includes("hombre") || t.includes("masculino") || t === "m" || t.includes("varon") || t.includes("varón")) return "masculino";
+  if (t.includes("mujer") || t.includes("femenino") || t === "f") return "femenino";
+  if (t.includes("no bin") || t.includes("nobin") || t.includes("no-bin") || t.includes("nb")) return "no_binario";
+  if (t.includes("prefiero") || t.includes("no decir") || t.includes("no quiero")) return "no_especifica";
+  return null;
+}
+
+function parseAge(text) {
+  const t = normalizeText(text);
+  const m = t.match(/(\d{1,3})/);
+  if (!m) return null;
+  const age = Number(m[1]);
+  if (!Number.isFinite(age) || age < 10 || age > 100) return null;
+  return age;
+}
+
+function parseWeightKg(text) {
+  const t = normalizeText(text).replace(",", ".");
+  const m = t.match(/(\d{2,3}(?:\.\d{1,2})?)/);
+  if (!m) return null;
+  const w = Number(m[1]);
+  if (!Number.isFinite(w) || w < 30 || w > 250) return null;
+  return w;
+}
+
+function formatMenuText() {
+  return (
+    "Hola! 👋\n" +
+    "¿Qué querés ver hoy?\n\n" +
+    "1) Gimnasio (clases, precios, ejercicios)\n" +
+    "2) Nutrición (dieta, calorías, macros, objetivos)\n\n" +
+    "Respondé: 'gimnasio' o 'nutrición'.\n" +
+    "Tip: escribí 'menu' cuando quieras volver."
+  );
 }
 
 // ======================
-// PROMPTS
+// PROMPTS (WhatsApp-friendly)
 // ======================
 function buildCoachPrompt(userText) {
   return `
 Actúa como entrenador personal.
-Responde en español claro, sin markdown.
+Responde en español, claro, práctico y sin markdown (sin ###).
 
-Usuario: "${userText}"
+El usuario pregunta: "${userText}"
 
-Incluye:
-- Qué trabaja
-- Técnica paso a paso
-- Errores comunes
+Formato de respuesta:
+- Qué trabaja (principal y secundarios)
+- Técnica paso a paso (1 a 6)
+- Errores comunes (5) + corrección
+- Respiración y ritmo
+- Variantes (principiante/intermedio/avanzado)
+- Seguridad (cuándo parar)
 - Mini rutina ejemplo
+
+No digas que no puedes mostrar imágenes.
 `;
 }
 
 function buildNutritionPrompt(userText, profile) {
+  const { gender, age, weightKg } = profile || {};
   return `
-Actúa como nutricionista deportivo.
-Responde en español claro, sin markdown.
+Actúa como nutricionista deportivo (información general, no diagnóstico).
+Responde en español, claro, práctico y sin markdown (sin ###).
 
-Datos:
-Genero: ${profile.gender}
-Edad: ${profile.age}
-Peso: ${profile.weightKg} kg
+Datos del usuario:
+- Género: ${gender || "no especificado"}
+- Edad: ${age || "no especificada"}
+- Peso: ${weightKg || "no especificado"} kg
 
-Usuario pregunta: "${userText}"
+El usuario pregunta: "${userText}"
 
-Incluye:
-- Recomendación clara
-- Rangos orientativos
-- Ejemplo práctico
-- Advertencia de seguridad
+Formato de respuesta:
+- Resumen corto (1-2 líneas)
+- Recomendación práctica (pasos concretos)
+- Rangos orientativos (si aplica): calorías/macros/porciones (evitar exactitud médica)
+- Ejemplo de 1 día (simple)
+- Errores comunes (3)
+- Seguridad (cuándo consultar profesional)
+
+No uses tablas. No uses markdown.
+`;
+}
+
+function buildExerciseImagePrompt(exerciseQuery) {
+  return `
+Ilustración técnica instructiva del ejercicio: "${exerciseQuery}"
+
+REQUISITOS:
+- Fondo blanco puro.
+- Estilo ilustración limpia tipo manual.
+- Sin texto, sin letras, sin números, sin etiquetas.
+- Dos paneles verticales separados por línea fina.
+- Misma persona, mismo ángulo, coherente.
+- Técnica correcta y segura, alineación articular correcta.
+- Evitar errores típicos.
+
+El panel 1 muestra una posición inicial estable.
+El panel 2 muestra la posición de mayor recorrido/contracción correcta.
+
+NO TEXTO. NO INGLÉS.
 `;
 }
 
 // ======================
-// GEMINI TEXT
+// GEMINI TEXT (con retry)
 // ======================
-async function askGemini(prompt) {
+async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
+  if (!GEMINI_API_KEY) return "Falta configurar GEMINI_API_KEY en el servidor.";
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: 1200 }
-    })
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1400,
+          topP: 0.9
+        }
+      })
+    });
 
-  const data = await r.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || "No pude generar respuesta.";
+    const data = await safeRead(response);
+
+    if (response.ok && !data?.error) {
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No pude generar una respuesta clara.";
+    }
+
+    const code = data?.error?.code || response.status;
+    if (code === 429 && attempt < maxAttempts) {
+      const retryS = extractRetryDelaySeconds(data?.error) ?? (8 * attempt);
+      logError("⚠️ Gemini 429 (texto). Reintento en", retryS, "s");
+      await sleep((retryS + 1) * 1000);
+      continue;
+    }
+
+    logError("❌ Gemini text error:", code, data?.error?.message || data);
+    return "Tuve un problema al responder. Probá de nuevo en un momento.";
+  }
+
+  return "Estoy con mucha demanda ahora. Probá en un minuto.";
 }
 
 // ======================
-// WEBHOOK
+// GEMINI IMAGE
+// ======================
+async function generateExerciseImageAndSave(imagePrompt) {
+  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: imagePrompt }] }]
+    })
+  });
+
+  const data = await safeRead(response);
+
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error?.message || `Image gen failed (${response.status})`);
+  }
+
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const inline = parts.find((p) => p.inlineData?.data);
+  const b64 = inline?.inlineData?.data;
+  if (!b64) throw new Error("No inline image data returned");
+
+  const buffer = Buffer.from(b64, "base64");
+  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
+  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
+
+  return filename;
+}
+
+// ======================
+// WEBHOOK VERIFY (Meta)
+// ======================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    logInfo("✅ Webhook verificado OK");
+    return res.status(200).send(challenge);
+  }
+  logError("❌ Webhook verify failed. mode/token mismatch.");
+  return res.sendStatus(403);
+});
+
+// ======================
+// WEBHOOK POST
 // ======================
 app.post("/webhook", async (req, res) => {
+  // responder rápido a Meta
   res.sendStatus(200);
 
   try {
-    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+    const entry = req.body?.entry?.[0];
+    const value = entry?.changes?.[0]?.value;
+
+    // DEBUG: esto te confirma si Meta está pegando al webhook
+    logDebug("🔔 webhook hit (raw keys):", Object.keys(req.body || {}));
+
     if (!value?.messages?.length) return;
 
     const message = value.messages[0];
-    const waId = message.from;
+
+    // waId correcto
+    let waId = value?.contacts?.[0]?.wa_id || message.from;
+
+    // Argentina 549 -> 54 (mantengo tu lógica)
+    if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
+
     const text = message?.text?.body || "";
     if (!text.trim()) return;
 
-    const state = getState(waId);
+    logInfo(`📩 ${waId}: ${text}`);
 
-    // MENU COMMAND
+    // ======================
+    // FLOW MENU / NUTRITION / GYM
+    // ======================
     if (isMenuCommand(text)) {
       resetToMenu(waId);
-      await sendText(waId, "¿Querés información de Gimnasio o Nutrición?");
+      await sendLongText(waId, formatMenuText());
       return;
     }
 
-    // MENU FLOW
-    if (state.flow === "menu") {
+    const state = getState(waId);
 
-      if (isNutritionIntent(text)) {
+    // Si está en menú: elegir rama
+    if (state.flow === "menu") {
+      const t = normalizeText(text);
+
+      // Si suena a nutrición (aunque diga "hola quiero bajar de peso")
+      if ((isNutritionIntent(text) && !isExerciseIntent(text)) || t.includes("nutri")) {
         state.flow = "nutrition";
         state.nutritionStep = "gender";
-        await sendText(waId, "1/3 ¿Tu género?");
+        userState.set(waId, state);
+        await sendText(
+          waId,
+          "Perfecto. Para ayudarte mejor con nutrición te hago 3 preguntas rápidas.\n1/3: ¿Tu género? (masculino / femenino / no binario / prefiero no decir)"
+        );
         return;
       }
 
+      // Si suena a gimnasio
+      if (t.includes("gim") || isGymIntent(text)) {
+        state.flow = "gym";
+        userState.set(waId, state);
+        // continúa
+      } else {
+        await sendLongText(waId, formatMenuText());
+        return;
+      }
+    }
+
+    // Si está en nutrition pero el usuario ahora pregunta de gym, cambiamos sin fricción
+    if (state.flow === "nutrition" && isGymIntent(text) && !isNutritionIntent(text)) {
       state.flow = "gym";
+      userState.set(waId, state);
+      // continúa a gym
     }
 
     // ======================
     // NUTRITION FLOW
     // ======================
     if (state.flow === "nutrition") {
+      const step = state.nutritionStep;
 
-      if (state.nutritionStep === "gender") {
-        state.nutritionProfile.gender = text;
+      if (step === "gender") {
+        const g = parseGender(text);
+        if (!g) {
+          await sendText(waId, "Dale. Decime: masculino / femenino / no binario / prefiero no decir.");
+          return;
+        }
+        state.nutritionProfile.gender = g;
         state.nutritionStep = "age";
-        await sendText(waId, "2/3 ¿Edad?");
+        userState.set(waId, state);
+        await sendText(waId, "2/3: ¿Qué edad tenés? (solo número, ej: 29)");
         return;
       }
 
-      if (state.nutritionStep === "age") {
-        state.nutritionProfile.age = text;
+      if (step === "age") {
+        const age = parseAge(text);
+        if (!age) {
+          await sendText(waId, "No pude leer la edad. Pasame un número entre 10 y 100 (ej: 29).");
+          return;
+        }
+        state.nutritionProfile.age = age;
         state.nutritionStep = "weight";
-        await sendText(waId, "3/3 ¿Peso en kg?");
+        userState.set(waId, state);
+        await sendText(waId, "3/3: ¿Cuánto pesás en kg? (ej: 72 o 72.5)");
         return;
       }
 
-      if (state.nutritionStep === "weight") {
-        state.nutritionProfile.weightKg = text;
+      if (step === "weight") {
+        const w = parseWeightKg(text);
+        if (!w) {
+          await sendText(waId, "No pude leer el peso. Pasame un número en kg (ej: 72 o 72.5).");
+          return;
+        }
+        state.nutritionProfile.weightKg = w;
         state.nutritionStep = "done";
-        await sendText(waId, "Perfecto. Ahora preguntame lo que quieras sobre nutrición.");
+        userState.set(waId, state);
+
+        await sendText(
+          waId,
+          "Listo ✅ Ya tengo tus datos.\nAhora preguntame lo que quieras de nutrición (calorías, macros, definición/volumen, comidas, etc.).\nPara volver al inicio: 'menu'."
+        );
         return;
       }
 
-      const reply = await askGemini(buildNutritionPrompt(text, state.nutritionProfile));
-      await sendLongText(waId, reply);
+      // done -> responder consultas de nutrición
+      const answer = await askGeminiTextWithRetry(buildNutritionPrompt(text, state.nutritionProfile));
+      await sendLongText(waId, answer);
       return;
     }
 
     // ======================
-    // GYM FLOW
+    // GYM FLOW (tu lógica original)
     // ======================
+
+    // 1) PRECIOS
+    if (isAskingPrices(text)) {
+      await sendLongText(waId, formatPlansText());
+      if (PLANS_IMAGE_URL) await sendImage(waId, PLANS_IMAGE_URL, "Planes disponibles");
+      return;
+    }
+
+    // 2) CLASES
+    if (isAskingClasses(text)) {
+      await sendText(waId, "Decime qué clase te interesa (Funcional / Zumba / etc.) y te paso días y horarios.");
+      if (CLASSES_IMAGE_URL) await sendImage(waId, CLASSES_IMAGE_URL, "Grilla de clases");
+      return;
+    }
+
+    // 3) SI PIDE IMAGEN PERO NO DICE EJERCICIO → usar último
+    if (wantsImage(text) && !isExerciseIntent(text)) {
+      const last = lastExerciseByUser.get(waId);
+      if (!last) {
+        await sendText(waId, "Dale. Decime el ejercicio exacto (por ejemplo: 'vuelos laterales') y te genero la imagen.");
+        return;
+      }
+
+      try {
+        await sendText(waId, `Perfecto. Genero la imagen de: ${last}`);
+        const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(last));
+        const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+        logInfo("🖼️ Image URL:", imgUrl);
+        await sendImage(waId, imgUrl, "Ejecución correcta (referencia)");
+      } catch (e) {
+        logError("❌ Error generando imagen:", e?.message || e);
+        await sendText(waId, "La imagen falló. Probá de nuevo en 1 minuto.");
+      }
+      return;
+    }
+
+    // 4) EJERCICIOS
     if (isExerciseIntent(text)) {
       lastExerciseByUser.set(waId, text);
-      const reply = await askGemini(buildCoachPrompt(text));
-      await sendLongText(waId, reply);
+
+      const explanation = await askGeminiTextWithRetry(buildCoachPrompt(text));
+      await sendLongText(waId, explanation);
+
+      if (wantsImage(text)) {
+        try {
+          await sendText(waId, "Generando imagen descriptiva...");
+          const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
+          const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+          logInfo("🖼️ Image URL:", imgUrl);
+          await sendImage(waId, imgUrl, "Ejecución correcta (referencia)");
+        } catch (e) {
+          logError("❌ Error generando imagen:", e?.message || e);
+          await sendText(waId, "Pude explicarte el ejercicio, pero la imagen falló. Probá de nuevo en 1 minuto.");
+        }
+      } else {
+        await sendText(waId, "Si querés, decime 'mostrame una imagen' y te genero una imagen descriptiva del ejercicio.");
+      }
+
       return;
     }
 
-    // DEFAULT
-    const reply = await askGemini(`Sos asistente de gimnasio. Responde claro.\nUsuario: ${text}`);
+    // 5) DEFAULT (si está en gym pero mensaje genérico)
+    const reply = await askGeminiTextWithRetry(
+      `Sos un asistente de gimnasio y nutrición. Responde en español, claro y útil, sin markdown.\nUsuario: ${text}`
+    );
     await sendLongText(waId, reply);
 
   } catch (err) {
-    console.error("Webhook error:", err);
+    logError("❌ Error webhook:", err);
   }
 });
 
 // ======================
-app.listen(process.env.PORT || 1000, () => {
-  console.log("🚀 Bot online");
+// START
+// ======================
+const port = process.env.PORT || 1000;
+app.listen(port, "0.0.0.0", () => {
+  logInfo(`🚀 Server on port ${port}`);
+  logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
+  logInfo("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
 });
