@@ -11,8 +11,11 @@ Actualmente sabemos que no hay mejores o peores Neurotipos, sino diferentes Neur
 Desde la Ciencia Psicológica conocer los Neurotipos contribuye a la comprensión integral de algunas experiencias y cómo son procesadas por una persona respecto de otras y cómo se configura cada subjetividad. Desde la Nutrición, lo que comemos también tiene un impacto directo en nuestro estado de ánimo, en el sueño, el apetito, la ansiedad, el miedo, el estrés, la concentración, la motivación y la energía por lo cual habrá una forma óptima de comer dependiendo de la química de cada cerebro. Si come los alimentos adecuados para la química de su propio cerebro según su neurotipo, reducirá el estrés general de su cuerpo, mejorará la estabilidad del estado de ánimo y se sentirá más como usted mismo/a. Esto va hacer que sea más propenso a ser constante y seguir su plan de nutrición y entrenamiento con menos esfuerzo. Y en relación al Entrenamiento Físico el NT también variarán los parámetros como volumen (total del entrenamiento), frecuencia (días por semana), si necesita o no variación, etc. 
 Para clasificar los 5 NT-Neurotipos tomaremos como referencia para su nominación aquella sustancia que el organismo más busca, y aquella otra de la que presenta mayor producción.  Las diferencias interindividuales de cada Neurotipo a su vez, corresponderá con el interjuego dinámico entre de los siguientes hormonas y neurotransmisores como la dopamina, acetilcolina, adrenalina, glutamato, GABA, serotonina y cortisol, en cada caso. 
 
-NEUROTIPO DOPA-G (BUSCADOR DE DOPAMINA y GABA DOMINANTE)
+## NEUROTIPO DOPA-G (BUSCADOR DE DOPAMINA y GABA DOMINANTE)
 Perfil Químico: dopamina dominante (baja dopamina, pero alta sensibilidad), baja acetilcolina, alta adrenalina, baja glutamato, alta GABA, serotonina moderada.
+
+
+
 
 
 
@@ -70,7 +73,7 @@ Son personas motivadas, ambiciosas, pero también impacientes por eso el objetiv
 Planificar su comida es imprescindible para evitar tropezar. Debido a que tienden a ser personas muy ocupadas y activas, tienden a depender de comidas rápidas, lo cual no es óptimo para propósitos de composición corporal. 
 Dado que son enérgicos/as y espontáneos/as, el plan debe dejar algo de libertad para el tiempo y la frecuencia de las comidas. Los de tipo DOPA-G son eficientes para que puedan seguir un plan, pero necesitan algo de espacio. Por eso el plan se basa en “COMIDAS EN CUALQUIER MOMENTO DEL DÍA” deben sentir que pueden comer cuando lo necesiten sin un horario fijo.
 
-NEUROTIPO   DOPA-A (BUSCADOR DE DOPAMINA y  ACETILCOLINA DOMINANTE)
+## NEUROTIPO   DOPA-A (BUSCADOR DE DOPAMINA y  ACETILCOLINA DOMINANTE)
 Perfil Químico: dopamina dominante (baja dopamina, pero alta sensibilidad), acetilcolina alta, adrenalina moderada, glutamato moderado, serotonina alta, GABA alto
 
 
@@ -126,7 +129,7 @@ Si el objetivo no está relacionado con la comida, dependerán de comidas rápid
 Son productores naturalmente bajos de dopamina, por lo que necesitan una mayor cantidad de proteínas (los aminoácidos tirosina que se encuentran en la carne animal son necesarios para producir dopamina) en sus dietas. Pero, por otro lado, tienen niveles de acetilcolina muy altos, esto los hace muy buenos para realizar múltiples tareas y pueden manejar diferentes tipos de planificación alimentaria más compleja.
 Su necesidad de carbohidratos es mucho menor que la de la mayoría de los otros neurotipos. Tampoco producen mucho cortisol, por lo que la recuperación y el catabolismo no los afectan incluso si los carbohidratos son bajos. 
 
-NEUROTIPO  ADRE-A o (BUSCADOR DE ADRENALINA y ACETILCOLINA DOMINANTE)
+## NEUROTIPO  ADRE-A o (BUSCADOR DE ADRENALINA y ACETILCOLINA DOMINANTE)
 Perfil Químico: dopamina moderada, acetilcolina moderadamente alta, (adrenalina baja pero alta sensibilidad), glutamato moderado, serotonina moderada, GABA moderado
 
 
@@ -173,8 +176,11 @@ Deberían aprovechar al máximo su nutrición con un enfoque más bajo en carboh
 En los días de descanso pueden consumir más carbohidratos, distribuidos en todo el día, así tendrán la variación que buscan y no se aburrirán. 
 Pueden ser adictos/as a la azúcar; Los tipos ADRE-A y los GABA-G tienden a ser los/as que más comen compulsivamente, la principal diferencia es que los tipos ADRE-A no se sentirán culpables por ello.
 
-NEUROTIPO GABA-G (BUSCADOR DE GABA y GLUTAMATO DOMINANTE)
+## NEUROTIPO GABA-G (BUSCADOR DE GABA y GLUTAMATO DOMINANTE)
 Perfil Químico: dopamina moderada, acetilcolina moderada, adrenalina bastante baja, glutamato alto (sensible), serotonina moderada, GABA bajo
+
+
+
 
 
 
@@ -222,8 +228,12 @@ Por eso el carbohidrato de preferencia debe ser de bajo índice glucémico o con
 Los GABA-G tienden a darse atracones y después sentirse culpables por ello.
 
 
-NEUROTIPO SERO-A  (BUSCADOR DE SEROTONINA Y ADRENALINA DOMINANTE) 
+## NEUROTIPO SERO-A  (BUSCADOR DE SEROTONINA Y ADRENALINA DOMINANTE) 
 Perfil Químico: dopamina bastante baja (pero alta sensibilidad), acetilcolina baja (pero variable), adrenalina alta, glutamato moderadamente alto, serotonina baja, GABA bastante bajo
+
+
+
+
 
 
 Referencias:
