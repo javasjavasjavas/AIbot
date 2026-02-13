@@ -103,7 +103,6 @@ function loadNutritionSystemPrompt() {
       return;
     }
     NUTRITION_SYSTEM_PROMPT = fs.readFileSync(NUTRITION_SYSTEM_PATH, "utf-8").trim();
-    // Reemplazo defensivo
     NUTRITION_SYSTEM_PROMPT = NUTRITION_SYSTEM_PROMPT.replace(/InBody/gi, "Antropometría");
     logInfo("🧠 nutricion-system.md cargado OK. chars:", NUTRITION_SYSTEM_PROMPT.length);
   } catch (e) {
@@ -194,8 +193,8 @@ function whatsappSafeText(text) {
     .trim();
 }
 
-// Split por párrafos y oraciones
-function splitForWhatsApp(text, maxLen = 2600) {
+function splitForWhatsApp(text, maxLen = 1800) {
+  // 👈 bajamos a 1800 para más margen y menos “recortes raros” de WhatsApp/cliente
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
 
@@ -283,7 +282,7 @@ async function sendImage(to, imageUrl, caption) {
 }
 
 async function sendLongText(to, text) {
-  const chunks = splitForWhatsApp(text, 2600);
+  const chunks = splitForWhatsApp(text, 1800);
   if (chunks.length === 1) {
     await sendText(to, chunks[0]);
     return;
@@ -528,7 +527,7 @@ NO TEXTO. NO INGLÉS.
 `;
 }
 
-function buildNutritionPrompt(userText, profile) {
+function buildNutritionJsonPlanPrompt(profile) {
   const sys = (NUTRITION_SYSTEM_PROMPT || "").trim();
 
   return `
@@ -545,32 +544,109 @@ Contexto del usuario (onboarding F45):
 - Respuestas análisis nutricional: ${profile.analysisNotes ?? "N/A"}
 - Flag sugerir Antropometría en 7 días: ${profile.flags?.suggestAnthroIn7Days ? "SI" : "NO"}
 
-Reglas extra (muy importante):
-- No te presentes. No saludes. No repitas "soy tu asistente".
-- Empezá directamente con: "Diagnóstico breve:"
-- Luego seguí con el plan de acción.
-- Sin markdown.
+Tarea:
+Genera un plan inicial para 7 días.
 
-Mensaje del usuario:
-"${userText}"
+Salida:
+DEVOLVÉ SOLO JSON VÁLIDO, sin texto extra, sin markdown, sin comentarios.
+Si no sabés algo, poné null o string vacío.
 
-Responde en español, sin markdown.
+Esquema JSON:
+{
+  "diagnostico_breve": "string (2-3 líneas máximo)",
+  "micro_ajustes": ["string", "string", "string", "string", "string", "string"],
+  "timing_entreno": ["string", "string"],
+  "hidratacion": ["string", "string"],
+  "accion_semana": "string (1 línea)",
+  "recordatorio_f45": "string (1-2 líneas)",
+  "sugerir_antropometria": "string o null",
+  "derivacion": "string o null"
+}
+
+Reglas duras:
+- NO te presentes. NO saludes.
+- Todo debe ser corto y accionable.
+- micro_ajustes: 3 a 6 ítems.
+- timing_entreno: 1 a 2 ítems.
+- hidratacion: 1 a 2 ítems.
 `;
 }
 
-function buildInitialNutritionPlanPrompt(profile) {
-  return buildNutritionPrompt(
-    "Con toda la información recopilada, armá un plan de acción inicial para 7 días alineado al objetivo. " +
-      "Estructura obligatoria: " +
-      "1) Diagnóstico breve (2-3 líneas) " +
-      "2) Micro ajustes concretos (3-6 bullets) " +
-      "3) Acción específica para esta semana (1 línea) " +
-      "4) Recordatorio motivador F45 (1-2 líneas) " +
-      "5) Si aplica: sugerir Antropometría " +
-      "6) Si aplica: sugerir derivación. " +
-      "No hagas preguntas adicionales ahora: ya está el onboarding completo.",
-    profile
-  );
+function formatPlanFromJson(obj) {
+  const lines = [];
+  const diag = obj?.diagnostico_breve || "";
+  const micro = Array.isArray(obj?.micro_ajustes) ? obj.micro_ajustes.filter(Boolean) : [];
+  const timing = Array.isArray(obj?.timing_entreno) ? obj.timing_entreno.filter(Boolean) : [];
+  const hidr = Array.isArray(obj?.hidratacion) ? obj.hidratacion.filter(Boolean) : [];
+  const accion = obj?.accion_semana || "";
+  const f45 = obj?.recordatorio_f45 || "";
+  const ant = obj?.sugerir_antropometria || "";
+  const der = obj?.derivacion || "";
+
+  if (diag) {
+    lines.push("Diagnóstico breve:");
+    lines.push(diag);
+    lines.push("");
+  }
+
+  if (micro.length) {
+    lines.push("Micro ajustes concretos:");
+    for (const m of micro) lines.push(`- ${m}`);
+    lines.push("");
+  }
+
+  if (timing.length) {
+    lines.push("Timing alrededor del entrenamiento:");
+    for (const t of timing) lines.push(`- ${t}`);
+    lines.push("");
+  }
+
+  if (hidr.length) {
+    lines.push("Hidratación:");
+    for (const h of hidr) lines.push(`- ${h}`);
+    lines.push("");
+  }
+
+  if (accion) {
+    lines.push("Acción concreta para esta semana:");
+    lines.push(accion);
+    lines.push("");
+  }
+
+  if (f45) {
+    lines.push("F45:");
+    lines.push(f45);
+    lines.push("");
+  }
+
+  if (ant) {
+    lines.push("Antropometría:");
+    lines.push(ant);
+    lines.push("");
+  }
+
+  if (der) {
+    lines.push("Derivación sugerida:");
+    lines.push(der);
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function tryParseJsonLoose(s) {
+  if (!s) return null;
+  const raw = s.trim();
+  // a veces el modelo mete texto antes/después; intentamos recortar al primer { ... último }
+  const first = raw.indexOf("{");
+  const last = raw.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  const slice = raw.slice(first, last + 1);
+  try {
+    return JSON.parse(slice);
+  } catch {
+    return null;
+  }
 }
 
 // ======================
@@ -588,8 +664,8 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.55,
-          maxOutputTokens: 1100,
+          temperature: 0.4,
+          maxOutputTokens: 900,
           topP: 0.9
         }
       })
@@ -697,12 +773,11 @@ app.post("/webhook", async (req, res) => {
     const state = getState(waId);
 
     // ======================
-    // MENU FLOW (decidir rama)
+    // MENU FLOW
     // ======================
     if (state.flow === "menu") {
       const t = normalizeText(text);
 
-      // Auto-disparo nutrición si suena a nutrición
       if (isNutritionIntent(text) && !isExerciseIntent(text)) {
         state.flow = "nutrition";
         state.nutritionStep = "objective";
@@ -714,7 +789,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Gym si suena a gym
       if (t.includes("gim") || isGymIntent(text)) {
         state.flow = "gym";
         userState.set(waId, state);
@@ -724,7 +798,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Si estaba en nutrition pero pregunta de gym, cambiar sin fricción
+    // Si estaba en nutrition pero pregunta de gym
     if (state.flow === "nutrition" && isGymIntent(text) && !isNutritionIntent(text)) {
       state.flow = "gym";
       userState.set(waId, state);
@@ -806,9 +880,7 @@ app.post("/webhook", async (req, res) => {
 
       if (step === "base_anthro") {
         state.nutritionProfile.lastAnthro = text.trim();
-        if (saysNoAnthro(text)) {
-          state.nutritionProfile.flags.suggestAnthroIn7Days = true;
-        }
+        if (saysNoAnthro(text)) state.nutritionProfile.flags.suggestAnthroIn7Days = true;
         state.nutritionStep = "base_bf";
         userState.set(waId, state);
         await sendText(waId, "¿Sabés tu % de grasa? (si no, respondé 'no')");
@@ -841,7 +913,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Ajuste 1: mensaje confirmación + mensaje separado con plan
+      // ✅ PLAN: pedimos JSON para evitar truncado raro, y lo formateamos nosotros
       if (step === "analysis") {
         state.nutritionProfile.analysisNotes = text.trim();
         state.nutritionStep = "done";
@@ -850,13 +922,46 @@ app.post("/webhook", async (req, res) => {
         await sendText(waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
         await sendText(waId, "Acá va tu plan inicial (7 días):");
 
-        const plan = await askGeminiTextWithRetry(buildInitialNutritionPlanPrompt(state.nutritionProfile));
-        await sendLongText(waId, plan);
+        const raw = await askGeminiTextWithRetry(buildNutritionJsonPlanPrompt(state.nutritionProfile));
+        const obj = tryParseJsonLoose(raw);
+
+        if (!obj) {
+          // fallback: mandamos el texto igual, pero avisamos
+          logError("⚠️ No pude parsear JSON del plan. Raw:", raw?.slice(0, 300));
+          await sendLongText(waId, raw);
+          return;
+        }
+
+        const planText = formatPlanFromJson(obj);
+        await sendLongText(waId, planText);
         return;
       }
 
-      // done: cualquier consulta nutricional
-      const reply = await askGeminiTextWithRetry(buildNutritionPrompt(text, state.nutritionProfile));
+      // done: preguntas nutrición (mantener simple; podés luego también pasarlo a JSON si querés)
+      const reply = await askGeminiTextWithRetry(
+        `
+${NUTRITION_SYSTEM_PROMPT}
+
+Reglas extra:
+- No te presentes. No saludes.
+- Responde claro, técnico y accionable.
+- Hacé preguntas si faltan datos relevantes.
+- Cerrar con UNA acción concreta para la semana.
+- Sin markdown.
+
+Contexto del usuario:
+Objetivo: ${state.nutritionProfile.objective ? `${state.nutritionProfile.objective} (${objectiveLabel(state.nutritionProfile.objective)})` : "N/A"}
+Peso: ${state.nutritionProfile.weightKg ?? "N/A"} kg
+Altura: ${state.nutritionProfile.heightCm ?? "N/A"} cm
+Edad: ${state.nutritionProfile.age ?? "N/A"}
+Sexo: ${state.nutritionProfile.sex ?? "N/A"}
+Última Antropometría: ${state.nutritionProfile.lastAnthro ?? "N/A"}
+% grasa: ${state.nutritionProfile.bodyFatPercent ?? "N/A"}
+Análisis: ${state.nutritionProfile.analysisNotes ?? "N/A"}
+
+Usuario: "${text}"
+        `.trim()
+      );
       await sendLongText(waId, reply);
       return;
     }
