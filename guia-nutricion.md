@@ -1,4 +1,3 @@
-
 LAS  5 TIPOS NEUROTIPOS y su relación con la personalidad
 ¿Qué es un Neurotipo y cómo se relaciona con la química cerebral?
 Esta configuración neurobiológica constituye una de las bases sobre las que se va a ir organizando nuestra personalidad. ¿El neurotipo es la personalidad? No, es un aspecto relevante en términos somatopsíquicos, ya que somos organismos vivientes con una conformación psiconeuroendrocrinológica y social de la cual nuestro cuerpo con todos sus subsistemas constituye un aspecto muy importante. Aunque no el único como hemos aprendido acerca de la influencia del contexto, la cultura, el ambiente, las relaciones sociales, la nutrición, las experiencias placenteras y displacenteras, lo traumático, las enfermedades, etc en la historia de la humanidad.
