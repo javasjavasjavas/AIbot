@@ -103,7 +103,7 @@ function loadNutritionSystemPrompt() {
       return;
     }
     NUTRITION_SYSTEM_PROMPT = fs.readFileSync(NUTRITION_SYSTEM_PATH, "utf-8").trim();
-    // Por si el archivo aún menciona "InBody", lo reemplazamos por "Antropometría"
+    // Reemplazo defensivo
     NUTRITION_SYSTEM_PROMPT = NUTRITION_SYSTEM_PROMPT.replace(/InBody/gi, "Antropometría");
     logInfo("🧠 nutricion-system.md cargado OK. chars:", NUTRITION_SYSTEM_PROMPT.length);
   } catch (e) {
@@ -363,8 +363,15 @@ function isGymIntent(text) {
 // ======================
 function isMenuCommand(text) {
   const t = normalizeText(text);
-  return t === "menu" || t === "menú" || t === "inicio" || t === "start" ||
-    t.includes("volver al menu") || t.includes("volver al menu principal") || t.includes("menu principal");
+  return (
+    t === "menu" ||
+    t === "menú" ||
+    t === "inicio" ||
+    t === "start" ||
+    t.includes("volver al menu") ||
+    t.includes("volver al menu principal") ||
+    t.includes("menu principal")
+  );
 }
 
 function formatMenuText() {
@@ -374,7 +381,7 @@ function formatMenuText() {
     "1) Gimnasio (clases, precios, ejercicios)\n" +
     "2) Nutrición (onboarding + plan de hábitos)\n\n" +
     "Respondé: 'gimnasio' o 'nutrición'.\n" +
-    "Tip: escribí 'menu' cuando quieras volver."
+    "Tip: escribí 'volver al menu principal' cuando quieras volver."
   );
 }
 
@@ -538,13 +545,11 @@ Contexto del usuario (onboarding F45):
 - Respuestas análisis nutricional: ${profile.analysisNotes ?? "N/A"}
 - Flag sugerir Antropometría en 7 días: ${profile.flags?.suggestAnthroIn7Days ? "SI" : "NO"}
 
-Instrucciones extra:
-- Si el onboarding NO está completo, pedí los datos faltantes antes de recomendar.
-- Hacé preguntas antes de recomendar.
-- Micro ajustes progresivos.
-- Cerrar con UNA acción concreta para la semana.
-- Reforzar F45.
-- Si detectás señales de riesgo, sugerí derivación al nutricionista.
+Reglas extra (muy importante):
+- No te presentes. No saludes. No repitas "soy tu asistente".
+- Empezá directamente con: "Diagnóstico breve:"
+- Luego seguí con el plan de acción.
+- Sin markdown.
 
 Mensaje del usuario:
 "${userText}"
@@ -554,12 +559,16 @@ Responde en español, sin markdown.
 }
 
 function buildInitialNutritionPlanPrompt(profile) {
-  // Esto se dispara AUTOMÁTICAMENTE al completar analysis
   return buildNutritionPrompt(
-    "Con toda la información recopilada, armá un plan de acción inicial para 7 días. " +
-      "Debe estar alineado al objetivo del usuario y al sistema F45. " +
-      "Incluí: diagnóstico breve, micro ajustes (3-6), guía de proteína e hidratación, timing alrededor del entrenamiento, " +
-      "y cerrá con una acción concreta para esta semana. Si corresponde, sugerí Antropometría.",
+    "Con toda la información recopilada, armá un plan de acción inicial para 7 días alineado al objetivo. " +
+      "Estructura obligatoria: " +
+      "1) Diagnóstico breve (2-3 líneas) " +
+      "2) Micro ajustes concretos (3-6 bullets) " +
+      "3) Acción específica para esta semana (1 línea) " +
+      "4) Recordatorio motivador F45 (1-2 líneas) " +
+      "5) Si aplica: sugerir Antropometría " +
+      "6) Si aplica: sugerir derivación. " +
+      "No hagas preguntas adicionales ahora: ya está el onboarding completo.",
     profile
   );
 }
@@ -579,8 +588,8 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.6,
-          maxOutputTokens: 1400,
+          temperature: 0.55,
+          maxOutputTokens: 1100,
           topP: 0.9
         }
       })
@@ -709,7 +718,6 @@ app.post("/webhook", async (req, res) => {
       if (t.includes("gim") || isGymIntent(text)) {
         state.flow = "gym";
         userState.set(waId, state);
-        // continúa a gym
       } else {
         await sendLongText(waId, formatMenuText());
         return;
@@ -723,12 +731,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ======================
-    // NUTRITION FLOW — Onboarding según documento
+    // NUTRITION FLOW
     // ======================
     if (state.flow === "nutrition") {
       const step = state.nutritionStep;
 
-      // Paso 1: Objetivo
       if (step === "objective") {
         const obj = parseObjective(text);
         if (!obj) {
@@ -745,7 +752,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: peso
       if (step === "base_weight") {
         const w = parseWeightKg(text);
         if (!w) {
@@ -759,7 +765,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: altura
       if (step === "base_height") {
         const h = parseHeightCm(text);
         if (!h) {
@@ -773,7 +778,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: edad
       if (step === "base_age") {
         const age = parseAge(text);
         if (!age) {
@@ -787,7 +791,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: sexo
       if (step === "base_sex") {
         const sx = parseSex(text);
         if (!sx) {
@@ -801,7 +804,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: Antropometría
       if (step === "base_anthro") {
         state.nutritionProfile.lastAnthro = text.trim();
         if (saysNoAnthro(text)) {
@@ -813,7 +815,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Datos base: % grasa (opcional)
       if (step === "base_bf") {
         const t = normalizeText(text);
         if (!(t === "no" || t === "nop" || t === "no se" || t === "no sé" || t === "nose")) {
@@ -840,20 +841,21 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Paso 3: análisis nutricional (guardar + disparar plan automático)
+      // ✅ Ajuste 1: mensaje confirmación + mensaje separado con plan
       if (step === "analysis") {
         state.nutritionProfile.analysisNotes = text.trim();
         state.nutritionStep = "done";
         userState.set(waId, state);
 
         await sendText(waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
+        await sendText(waId, "Acá va tu plan inicial (7 días):");
 
         const plan = await askGeminiTextWithRetry(buildInitialNutritionPlanPrompt(state.nutritionProfile));
         await sendLongText(waId, plan);
         return;
       }
 
-      // done: cualquier consulta nutricional usando sistema + perfil
+      // done: cualquier consulta nutricional
       const reply = await askGeminiTextWithRetry(buildNutritionPrompt(text, state.nutritionProfile));
       await sendLongText(waId, reply);
       return;
@@ -862,22 +864,18 @@ app.post("/webhook", async (req, res) => {
     // ======================
     // GYM FLOW
     // ======================
-
-    // 1) PRECIOS
     if (isAskingPrices(text)) {
       await sendLongText(waId, formatPlansText());
       if (PLANS_IMAGE_URL) await sendImage(waId, PLANS_IMAGE_URL, "Planes disponibles");
       return;
     }
 
-    // 2) CLASES
     if (isAskingClasses(text)) {
       await sendText(waId, "Decime qué clase te interesa (Funcional / Zumba / etc.) y te paso días y horarios.");
       if (CLASSES_IMAGE_URL) await sendImage(waId, CLASSES_IMAGE_URL, "Grilla de clases");
       return;
     }
 
-    // 3) SI PIDE IMAGEN PERO NO DICE EJERCICIO → usar último
     if (wantsImage(text) && !isExerciseIntent(text)) {
       const last = lastExerciseByUser.get(waId);
       if (!last) {
@@ -898,7 +896,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 4) EJERCICIOS
     if (isExerciseIntent(text)) {
       lastExerciseByUser.set(waId, text);
 
@@ -923,7 +920,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 5) DEFAULT
     const defaultReply = await askGeminiTextWithRetry(
       `Sos un asistente de gimnasio. Responde en español, claro y útil, sin markdown.\nUsuario: ${text}`
     );
