@@ -35,9 +35,10 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 // ======================
 // MEMORY (RAM)
 // ======================
+// Guarda el último ejercicio por usuario.
 const lastExerciseByUser = new Map(); // waId -> string
 
-// Estado conversación (menu/gym/nutrition)
+// Estado conversación (menu/gym/nutrition) + perfil nutrición
 const userState = new Map(); // waId -> { flow, nutritionStep, nutritionProfile }
 
 function getState(waId) {
@@ -45,7 +46,14 @@ function getState(waId) {
     userState.set(waId, {
       flow: "menu", // menu | gym | nutrition
       nutritionStep: null, // gender | age | weight | done
-      nutritionProfile: { gender: null, age: null, weightKg: null }
+      nutritionProfile: {
+        gender: null,
+        age: null,
+        weightKg: null,
+        neurotypeId: null,
+        neurotypeName: null,
+        neurotypeConfidence: null
+      }
     });
   }
   return userState.get(waId);
@@ -55,7 +63,14 @@ function resetToMenu(waId) {
   userState.set(waId, {
     flow: "menu",
     nutritionStep: null,
-    nutritionProfile: { gender: null, age: null, weightKg: null }
+    nutritionProfile: {
+      gender: null,
+      age: null,
+      weightKg: null,
+      neurotypeId: null,
+      neurotypeName: null,
+      neurotypeConfidence: null
+    }
   });
 }
 
@@ -81,6 +96,12 @@ app.get("/health", (req, res) => {
       hasWhatsappToken: !!WHATSAPP_TOKEN,
       hasPhoneNumberId: !!PHONE_NUMBER_ID,
       hasGeminiKey: !!GEMINI_API_KEY
+    },
+    knowledge: {
+      guideLoaded: GUIDE_CHUNKS.length > 0,
+      chunks: GUIDE_CHUNKS.length,
+      neurotypes: NEUROTYPES.length,
+      guidePath: NUTRITION_GUIDE_PATH
     }
   });
 });
@@ -116,7 +137,11 @@ function sleep(ms) {
 }
 
 async function safeRead(r) {
-  try { return await r.json(); } catch { return await r.text(); }
+  try {
+    return await r.json();
+  } catch {
+    return await r.text();
+  }
 }
 
 function extractRetryDelaySeconds(errObj) {
@@ -148,7 +173,7 @@ function splitForWhatsApp(text, maxLen = 2600) {
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
 
-  const paragraphs = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  const paragraphs = t.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
 
   const parts = [];
   let current = "";
@@ -183,7 +208,7 @@ function splitForWhatsApp(text, maxLen = 2600) {
 }
 
 // ======================
-// WHATSAPP SENDERS (con logs de error)
+// WHATSAPP SENDERS
 // ======================
 async function sendText(to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
@@ -247,6 +272,120 @@ async function sendLongText(to, text) {
 }
 
 // ======================
+// KNOWLEDGE: Guía Nutrición (RAG simple)
+// ======================
+// Estructura esperada: secciones con encabezados tipo:
+// ## NEUROTIPO GABA-G (....)
+// y otras secciones con ## ...
+const NUTRITION_GUIDE_PATH = path.join(process.cwd(), "knowledge", "guia-nutricion.md");
+
+let GUIDE_TEXT = "";
+let GUIDE_CHUNKS = []; // [{ id, title, text }]
+let NEUROTYPES = []; // [{ id, name, text }]
+
+function loadNutritionGuide() {
+  try {
+    if (!fs.existsSync(NUTRITION_GUIDE_PATH)) {
+      logError("❌ No se encontró la guía en:", NUTRITION_GUIDE_PATH);
+      GUIDE_TEXT = "";
+      GUIDE_CHUNKS = [];
+      NEUROTYPES = [];
+      return;
+    }
+
+    GUIDE_TEXT = fs.readFileSync(NUTRITION_GUIDE_PATH, "utf-8");
+    const cleaned = GUIDE_TEXT.replace(/\r\n/g, "\n").trim();
+
+    // Split por encabezados de nivel 2: "## "
+    const rawSections = cleaned.split(/\n(?=##\s)/g);
+
+    GUIDE_CHUNKS = rawSections
+      .map((sec, idx) => {
+        const m = sec.match(/^##\s+(.+)\n/);
+        const title = (m?.[1] || `Sección ${idx + 1}`).trim();
+        return { id: `S${idx + 1}`, title, text: sec.trim() };
+      })
+      .filter((s) => s.text.length > 40);
+
+    // Neurotipos: títulos que arranquen con "NEUROTIPO"
+    // Ej: "NEUROTIPO GABA-G (BUSCADOR DE GABA y GLUTAMATO DOMINANTE)"
+    const neuroSections = GUIDE_CHUNKS.filter((s) => {
+      const tt = normalizeText(s.title);
+      return tt.startsWith("neurotipo");
+    });
+
+    // Asignar IDs N1..Nn
+    NEUROTYPES = neuroSections.map((s, i) => ({
+      id: `N${i + 1}`,
+      name: s.title,
+      text: s.text
+    }));
+
+    logInfo("📚 Guía nutrición cargada:", {
+      chars: cleaned.length,
+      chunks: GUIDE_CHUNKS.length,
+      neurotypes: NEUROTYPES.length
+    });
+
+    if (!NEUROTYPES.length) {
+      logError("⚠️ No se detectaron neurotipos. Verificá que los títulos empiecen con '## NEUROTIPO ...'");
+    }
+  } catch (e) {
+    logError("❌ Error cargando guía nutrición:", e?.message || e);
+    GUIDE_TEXT = "";
+    GUIDE_CHUNKS = [];
+    NEUROTYPES = [];
+  }
+}
+
+// Búsqueda simple por keywords (sin embeddings)
+function retrieveGuideChunks(query, topK = 5) {
+  const q = normalizeText(query);
+  if (!q || !GUIDE_CHUNKS.length) return [];
+
+  const qWords = q.split(/\s+/).filter((w) => w.length >= 3);
+
+  const scored = GUIDE_CHUNKS.map((ch) => {
+    const hay = normalizeText(ch.title + " " + ch.text);
+    let score = 0;
+
+    for (const w of qWords) {
+      if (hay.includes(w)) score += 1;
+    }
+
+    // bonus si match en el título
+    const titleHay = normalizeText(ch.title);
+    for (const w of qWords) {
+      if (titleHay.includes(w)) score += 2;
+    }
+
+    return { ch, score };
+  });
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .filter((x) => x.score > 0)
+    .slice(0, topK)
+    .map((x) => x.ch);
+}
+
+// Parsing JSON robusto (por si Gemini agrega texto)
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // intentar extraer primer {...}
+    const m = (text || "").match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+// ======================
 // INTENTS GYM
 // ======================
 function isAskingPrices(text) {
@@ -296,14 +435,14 @@ function wantsImage(text) {
 
 function isExerciseIntent(text) {
   const t = normalizeText(text);
-  if (EXERCISE_KEYWORDS.some(k => t.includes(normalizeText(k)))) return true;
+  if (EXERCISE_KEYWORDS.some((k) => t.includes(normalizeText(k)))) return true;
 
   const howTo = t.includes("como") || t.includes("cómo");
   const doIt = t.includes("hacer") || t.includes("se hace") || t.includes("realizar");
   const bodyParts = ["hombro", "pecho", "espalda", "pierna", "biceps", "bíceps", "triceps", "tríceps", "gluteo", "glúteo", "abdomen", "core"];
-  const mentionsBody = bodyParts.some(b => t.includes(normalizeText(b)));
+  const mentionsBody = bodyParts.some((b) => t.includes(normalizeText(b)));
 
-  if ((howTo && doIt) && mentionsBody) return true;
+  if (howTo && doIt && mentionsBody) return true;
   return false;
 }
 
@@ -335,11 +474,11 @@ function isNutritionIntent(text) {
     "suplemento", "suplementos", "creatina", "whey"
   ];
 
-  if (strongPhrases.some(p => t.includes(p))) return true;
+  if (strongPhrases.some((p) => t.includes(p))) return true;
 
   const wants = t.includes("quiero") || t.includes("necesito") || t.includes("me gustaria") || t.includes("me gustaría");
   const goalWords = ["bajar", "perder", "definir", "marcar", "volumen", "musculo", "músculo"];
-  if (wants && goalWords.some(g => t.includes(g))) return true;
+  if (wants && goalWords.some((g) => t.includes(g))) return true;
 
   return false;
 }
@@ -376,14 +515,14 @@ function formatMenuText() {
     "Hola! 👋\n" +
     "¿Qué querés ver hoy?\n\n" +
     "1) Gimnasio (clases, precios, ejercicios)\n" +
-    "2) Nutrición (dieta, calorías, macros, objetivos)\n\n" +
+    "2) Nutrición (plan, calorías, macros, objetivos)\n\n" +
     "Respondé: 'gimnasio' o 'nutrición'.\n" +
     "Tip: escribí 'menu' cuando quieras volver."
   );
 }
 
 // ======================
-// PROMPTS (WhatsApp-friendly)
+// PROMPTS
 // ======================
 function buildCoachPrompt(userText) {
   return `
@@ -402,31 +541,6 @@ Formato de respuesta:
 - Mini rutina ejemplo
 
 No digas que no puedes mostrar imágenes.
-`;
-}
-
-function buildNutritionPrompt(userText, profile) {
-  const { gender, age, weightKg } = profile || {};
-  return `
-Actúa como nutricionista deportivo (información general, no diagnóstico).
-Responde en español, claro, práctico y sin markdown (sin ###).
-
-Datos del usuario:
-- Género: ${gender || "no especificado"}
-- Edad: ${age || "no especificada"}
-- Peso: ${weightKg || "no especificado"} kg
-
-El usuario pregunta: "${userText}"
-
-Formato de respuesta:
-- Resumen corto (1-2 líneas)
-- Recomendación práctica (pasos concretos)
-- Rangos orientativos (si aplica): calorías/macros/porciones (evitar exactitud médica)
-- Ejemplo de 1 día (simple)
-- Errores comunes (3)
-- Seguridad (cuándo consultar profesional)
-
-No uses tablas. No uses markdown.
 `;
 }
 
@@ -450,6 +564,67 @@ NO TEXTO. NO INGLÉS.
 `;
 }
 
+function buildNeurotypeClassificationPrompt(profile) {
+  // OJO tokens: enviamos SOLO neurotipos, no toda la guía
+  const neuroList = NEUROTYPES.map((n) => `- ${n.id}: ${n.name}`).join("\n");
+
+  const neuroTexts = NEUROTYPES.map((n) => {
+    const clipped = n.text.length > 2200 ? n.text.slice(0, 2200) + "\n(…recortado)" : n.text;
+    return `\n[${n.id}] ${n.name}\n${clipped}\n`;
+  }).join("\n");
+
+  return `
+Sos un asistente de nutrición. Tu tarea es clasificar al usuario en UN (1) neurotipo basado SOLO en la guía provista (secciones de neurotipos).
+No inventes. Si falta información, elegí el más probable con baja confianza.
+
+Datos del usuario:
+- Género: ${profile.gender || "no especificado"}
+- Edad: ${profile.age || "no especificada"}
+- Peso: ${profile.weightKg || "no especificado"} kg
+
+Neurotipos disponibles:
+${neuroList}
+
+Contenido de la guía (neurotipos):
+${neuroTexts}
+
+Devolvé SOLO JSON en una sola línea, sin texto extra:
+{"neurotype_id":"N1","confidence":0.0,"why":"...","used_sections":["N1","N3"]}
+`;
+}
+
+function buildNutritionAnswerWithGuidePrompt(userText, profile, retrievedChunks) {
+  const context = retrievedChunks.map((c) => {
+    const clipped = c.text.length > 1800 ? c.text.slice(0, 1800) + "\n(…recortado)" : c.text;
+    return `\n[${c.id}] ${c.title}\n${clipped}\n`;
+  }).join("\n");
+
+  return `
+Actuá como nutricionista deportivo (información general, no diagnóstico).
+REGLA: La guía es la fuente primaria. No inventes. Si algo no está en la guía, decilo explícitamente.
+
+Perfil del usuario:
+- Género: ${profile.gender || "N/A"}
+- Edad: ${profile.age || "N/A"}
+- Peso: ${profile.weightKg || "N/A"} kg
+- Neurotipo: ${profile.neurotypeName || "sin clasificar"} (${profile.neurotypeId || "-"})
+
+Pregunta del usuario:
+"${userText}"
+
+Fragmentos relevantes de la guía:
+${context || "(No se encontraron fragmentos relevantes)"}
+
+Formato de respuesta:
+- Respuesta directa (2-4 líneas)
+- Plan / pasos concretos (bullets simples)
+- Nota: fragmentos usados (IDs, ej: S3, S9)
+- Seguridad (cuándo consultar profesional)
+
+Sin markdown.
+`;
+}
+
 // ======================
 // GEMINI TEXT (con retry)
 // ======================
@@ -465,7 +640,7 @@ async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.7,
+          temperature: 0.5, // un poco más determinista para “seguir guía”
           maxOutputTokens: 1400,
           topP: 0.9
         }
@@ -528,7 +703,7 @@ async function generateExerciseImageAndSave(imagePrompt) {
 }
 
 // ======================
-// WEBHOOK VERIFY (Meta)
+// WEBHOOK VERIFY
 // ======================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -539,7 +714,6 @@ app.get("/webhook", (req, res) => {
     logInfo("✅ Webhook verificado OK");
     return res.status(200).send(challenge);
   }
-  logError("❌ Webhook verify failed. mode/token mismatch.");
   return res.sendStatus(403);
 });
 
@@ -547,24 +721,18 @@ app.get("/webhook", (req, res) => {
 // WEBHOOK POST
 // ======================
 app.post("/webhook", async (req, res) => {
-  // responder rápido a Meta
   res.sendStatus(200);
 
   try {
     const entry = req.body?.entry?.[0];
     const value = entry?.changes?.[0]?.value;
 
-    // DEBUG: esto te confirma si Meta está pegando al webhook
-    logDebug("🔔 webhook hit (raw keys):", Object.keys(req.body || {}));
-
     if (!value?.messages?.length) return;
 
     const message = value.messages[0];
-
-    // waId correcto
     let waId = value?.contacts?.[0]?.wa_id || message.from;
 
-    // Argentina 549 -> 54 (mantengo tu lógica)
+    // Argentina 549 -> 54
     if (waId?.startsWith("549")) waId = "54" + waId.substring(3);
 
     const text = message?.text?.body || "";
@@ -573,7 +741,7 @@ app.post("/webhook", async (req, res) => {
     logInfo(`📩 ${waId}: ${text}`);
 
     // ======================
-    // FLOW MENU / NUTRITION / GYM
+    // FLOW: MENU / NUTRITION / GYM
     // ======================
     if (isMenuCommand(text)) {
       resetToMenu(waId);
@@ -583,11 +751,11 @@ app.post("/webhook", async (req, res) => {
 
     const state = getState(waId);
 
-    // Si está en menú: elegir rama
+    // Si está en menú, primero obligamos a elegir o inferimos por intención
     if (state.flow === "menu") {
       const t = normalizeText(text);
 
-      // Si suena a nutrición (aunque diga "hola quiero bajar de peso")
+      // Auto-disparo: si suena a nutrición (ej: "hola quiero bajar de peso")
       if ((isNutritionIntent(text) && !isExerciseIntent(text)) || t.includes("nutri")) {
         state.flow = "nutrition";
         state.nutritionStep = "gender";
@@ -610,11 +778,11 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Si está en nutrition pero el usuario ahora pregunta de gym, cambiamos sin fricción
+    // Si está en nutrition pero el usuario pregunta de gym, cambiamos sin fricción
     if (state.flow === "nutrition" && isGymIntent(text) && !isNutritionIntent(text)) {
       state.flow = "gym";
       userState.set(waId, state);
-      // continúa a gym
+      // continúa
     }
 
     // ======================
@@ -623,6 +791,7 @@ app.post("/webhook", async (req, res) => {
     if (state.flow === "nutrition") {
       const step = state.nutritionStep;
 
+      // 1) Género
       if (step === "gender") {
         const g = parseGender(text);
         if (!g) {
@@ -636,6 +805,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      // 2) Edad
       if (step === "age") {
         const age = parseAge(text);
         if (!age) {
@@ -649,25 +819,72 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      // 3) Peso + clasificación neurotipo
       if (step === "weight") {
         const w = parseWeightKg(text);
         if (!w) {
           await sendText(waId, "No pude leer el peso. Pasame un número en kg (ej: 72 o 72.5).");
           return;
         }
+
         state.nutritionProfile.weightKg = w;
         state.nutritionStep = "done";
         userState.set(waId, state);
 
+        // Clasificar neurotipo usando SOLO secciones de neurotipos
+        if (NEUROTYPES.length) {
+          try {
+            await sendText(waId, "Gracias. Un segundo que te asigno tu neurotipo según la guía...");
+            const clsRaw = await askGeminiTextWithRetry(buildNeurotypeClassificationPrompt(state.nutritionProfile));
+            const cls = safeJsonParse(clsRaw);
+
+            if (cls?.neurotype_id) {
+              const match = NEUROTYPES.find((n) => n.id === String(cls.neurotype_id).trim());
+              state.nutritionProfile.neurotypeId = String(cls.neurotype_id).trim();
+              state.nutritionProfile.neurotypeName = match?.name || null;
+
+              const conf = Number(cls.confidence);
+              state.nutritionProfile.neurotypeConfidence = Number.isFinite(conf) ? conf : null;
+
+              userState.set(waId, state);
+
+              const ntName = state.nutritionProfile.neurotypeName || state.nutritionProfile.neurotypeId;
+              await sendText(
+                waId,
+                `Listo ✅ Según la guía, tu neurotipo más probable es:\n${ntName}\n\nAhora preguntame lo que quieras de nutrición y voy a responder basándome en la guía.\nPara volver al inicio: 'menu'.`
+              );
+              return;
+            }
+
+            // Si falló el parseo
+            await sendText(
+              waId,
+              "Listo ✅ Ya tengo tus datos.\nNo pude asignar el neurotipo con certeza todavía, pero igual puedo ayudarte.\nPreguntame lo que quieras de nutrición y respondo basándome en la guía.\nPara volver al inicio: 'menu'."
+            );
+            return;
+
+          } catch (e) {
+            logError("❌ Error clasificando neurotipo:", e?.message || e);
+            await sendText(
+              waId,
+              "Listo ✅ Ya tengo tus datos.\nHubo un error asignando el neurotipo, pero igual puedo responder usando la guía.\nHaceme tu consulta.\nPara volver al inicio: 'menu'."
+            );
+            return;
+          }
+        }
+
+        // Si no hay neurotipos detectados en el .md
         await sendText(
           waId,
-          "Listo ✅ Ya tengo tus datos.\nAhora preguntame lo que quieras de nutrición (calorías, macros, definición/volumen, comidas, etc.).\nPara volver al inicio: 'menu'."
+          "Listo ✅ Ya tengo tus datos.\nAhora preguntame lo que quieras de nutrición y respondo basándome en la guía.\nPara volver al inicio: 'menu'."
         );
         return;
       }
 
-      // done -> responder consultas de nutrición
-      const answer = await askGeminiTextWithRetry(buildNutritionPrompt(text, state.nutritionProfile));
+      // 4) done -> responder con la guía como fuente primaria
+      const chunks = retrieveGuideChunks(text, 5);
+      const prompt = buildNutritionAnswerWithGuidePrompt(text, state.nutritionProfile, chunks);
+      const answer = await askGeminiTextWithRetry(prompt);
       await sendLongText(waId, answer);
       return;
     }
@@ -736,7 +953,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 5) DEFAULT (si está en gym pero mensaje genérico)
+    // 5) DEFAULT
     const reply = await askGeminiTextWithRetry(
       `Sos un asistente de gimnasio y nutrición. Responde en español, claro y útil, sin markdown.\nUsuario: ${text}`
     );
@@ -750,9 +967,12 @@ app.post("/webhook", async (req, res) => {
 // ======================
 // START
 // ======================
+loadNutritionGuide();
+
 const port = process.env.PORT || 1000;
 app.listen(port, "0.0.0.0", () => {
   logInfo(`🚀 Server on port ${port}`);
   logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
   logInfo("✅ Models:", { GEMINI_TEXT_MODEL, GEMINI_IMAGE_MODEL });
+  logInfo("✅ Knowledge:", { chunks: GUIDE_CHUNKS.length, neurotypes: NEUROTYPES.length });
 });
