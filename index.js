@@ -35,12 +35,12 @@ const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 // ======================
 // MEMORY (RAM)
 // ======================
-// Guarda el último ejercicio por usuario. OJO: en Render free puede reiniciarse.
 const lastExerciseByUser = new Map(); // waId -> string
 
 // Estado conversación
 // flow: menu | gym | nutrition
-// nutritionStep: objective | base_weight | base_height | base_age | base_sex | base_inbody | base_bf | analysis | done
+// nutritionStep:
+// objective | base_weight | base_height | base_age | base_sex | base_anthro | base_bf | analysis | done
 const userState = new Map(); // waId -> { flow, nutritionStep, nutritionProfile }
 
 function getState(waId) {
@@ -49,14 +49,15 @@ function getState(waId) {
       flow: "menu",
       nutritionStep: null,
       nutritionProfile: {
-        objective: null,      // A/B/C/D/E
+        objective: null, // A/B/C/D/E
         weightKg: null,
         heightCm: null,
         age: null,
         sex: null,
-        lastInbody: null,     // texto libre / fecha
+        lastAnthro: null, // texto libre / fecha
         bodyFatPercent: null, // número opcional
-        flags: { suggestInbodyIn7Days: false, riskReferral: false }
+        analysisNotes: null, // respuestas a análisis
+        flags: { suggestAnthroIn7Days: false, riskReferral: false }
       }
     });
   }
@@ -73,9 +74,10 @@ function resetToMenu(waId) {
       heightCm: null,
       age: null,
       sex: null,
-      lastInbody: null,
+      lastAnthro: null,
       bodyFatPercent: null,
-      flags: { suggestInbodyIn7Days: false, riskReferral: false }
+      analysisNotes: null,
+      flags: { suggestAnthroIn7Days: false, riskReferral: false }
     }
   });
 }
@@ -101,6 +103,8 @@ function loadNutritionSystemPrompt() {
       return;
     }
     NUTRITION_SYSTEM_PROMPT = fs.readFileSync(NUTRITION_SYSTEM_PATH, "utf-8").trim();
+    // Por si el archivo aún menciona "InBody", lo reemplazamos por "Antropometría"
+    NUTRITION_SYSTEM_PROMPT = NUTRITION_SYSTEM_PROMPT.replace(/InBody/gi, "Antropometría");
     logInfo("🧠 nutricion-system.md cargado OK. chars:", NUTRITION_SYSTEM_PROMPT.length);
   } catch (e) {
     NUTRITION_SYSTEM_PROMPT = "";
@@ -290,7 +294,7 @@ async function sendLongText(to, text) {
 }
 
 // ======================
-// INTENTS GYM (igual que antes)
+// INTENTS GYM
 // ======================
 function isAskingPrices(text) {
   const t = normalizeText(text);
@@ -359,7 +363,8 @@ function isGymIntent(text) {
 // ======================
 function isMenuCommand(text) {
   const t = normalizeText(text);
-  return t === "menu" || t === "menú" || t === "inicio" || t === "start";
+  return t === "menu" || t === "menú" || t === "inicio" || t === "start" ||
+    t.includes("volver al menu") || t.includes("volver al menu principal") || t.includes("menu principal");
 }
 
 function formatMenuText() {
@@ -398,23 +403,13 @@ function isNutritionIntent(text) {
 function parseObjective(text) {
   const t = normalizeText(text);
 
-  // A) Pérdida de grasa
-  if (t.includes("grasa") || t.includes("bajar") || t.includes("perder peso") || t.includes("definir") || t.includes("marcar")) return "A";
-
-  // B) Ganancia muscular
-  if (t.includes("masa") || t.includes("musculo") || t.includes("músculo") || t.includes("volumen") || t.includes("bulk")) return "B";
-
-  // C) Recomposición
-  if (t.includes("recompos") || (t.includes("bajar") && (t.includes("musculo") || t.includes("músculo")))) return "C";
-
-  // D) Rendimiento
-  if (t.includes("rendimiento") || t.includes("performance") || t.includes("correr") || t.includes("mejorar tiempos") || t.includes("energia") || t.includes("energía")) return "D";
-
-  // E) Salud general
-  if (t.includes("salud") || t.includes("bienestar") || t.includes("habitos") || t.includes("hábitos")) return "E";
-
-  // También aceptar letra directa
   if (["a", "b", "c", "d", "e"].includes(t)) return t.toUpperCase();
+
+  if (t.includes("grasa") || t.includes("bajar") || t.includes("perder peso") || t.includes("definir") || t.includes("marcar")) return "A";
+  if (t.includes("masa") || t.includes("musculo") || t.includes("músculo") || t.includes("volumen") || t.includes("bulk")) return "B";
+  if (t.includes("recompos") || (t.includes("bajar") && (t.includes("musculo") || t.includes("músculo")))) return "C";
+  if (t.includes("rendimiento") || t.includes("performance") || t.includes("mejorar tiempos") || t.includes("energia") || t.includes("energía")) return "D";
+  if (t.includes("salud") || t.includes("bienestar") || t.includes("habitos") || t.includes("hábitos")) return "E";
 
   return null;
 }
@@ -430,14 +425,13 @@ function parseWeightKg(text) {
 
 function parseHeightCm(text) {
   const t = normalizeText(text).replace(",", ".");
-  // Si pone 1.75 asumimos metros -> 175
   const m = t.match(/(\d{1,3}(?:\.\d{1,2})?)/);
   if (!m) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n)) return null;
 
-  if (n >= 1.2 && n <= 2.3) return Math.round(n * 100); // metros
-  if (n >= 120 && n <= 230) return Math.round(n);       // cm
+  if (n >= 1.2 && n <= 2.3) return Math.round(n * 100);
+  if (n >= 120 && n <= 230) return Math.round(n);
   return null;
 }
 
@@ -468,9 +462,20 @@ function parseBodyFatPercent(text) {
   return bf;
 }
 
-function saysNoInbody(text) {
+function saysNoAnthro(text) {
   const t = normalizeText(text);
-  return t.includes("no") && (t.includes("inbody") || t.includes("nunca") || t.includes("no tengo"));
+  return t.includes("no") && (t.includes("antrop") || t.includes("nunca") || t.includes("no tengo"));
+}
+
+function objectiveLabel(obj) {
+  switch (obj) {
+    case "A": return "Pérdida de grasa";
+    case "B": return "Ganancia muscular";
+    case "C": return "Recomposición corporal";
+    case "D": return "Rendimiento";
+    case "E": return "Salud general";
+    default: return "No definido";
+  }
 }
 
 // ======================
@@ -523,17 +528,18 @@ function buildNutritionPrompt(userText, profile) {
 ${sys}
 
 Contexto del usuario (onboarding F45):
-- Objetivo: ${profile.objective || "no definido"}
+- Objetivo: ${profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido"}
 - Peso: ${profile.weightKg ?? "N/A"} kg
 - Altura: ${profile.heightCm ?? "N/A"} cm
 - Edad: ${profile.age ?? "N/A"}
 - Sexo: ${profile.sex ?? "N/A"}
-- Última InBody: ${profile.lastInbody ?? "N/A"}
+- Última Antropometría: ${profile.lastAnthro ?? "N/A"}
 - % grasa (si sabe): ${profile.bodyFatPercent ?? "N/A"}
-- Flag sugerir InBody en 7 días: ${profile.flags?.suggestInbodyIn7Days ? "SI" : "NO"}
+- Respuestas análisis nutricional: ${profile.analysisNotes ?? "N/A"}
+- Flag sugerir Antropometría en 7 días: ${profile.flags?.suggestAnthroIn7Days ? "SI" : "NO"}
 
 Instrucciones extra:
-- Si el usuario aún no completó onboarding, pedí los datos faltantes antes de recomendar.
+- Si el onboarding NO está completo, pedí los datos faltantes antes de recomendar.
 - Hacé preguntas antes de recomendar.
 - Micro ajustes progresivos.
 - Cerrar con UNA acción concreta para la semana.
@@ -545,6 +551,17 @@ Mensaje del usuario:
 
 Responde en español, sin markdown.
 `;
+}
+
+function buildInitialNutritionPlanPrompt(profile) {
+  // Esto se dispara AUTOMÁTICAMENTE al completar analysis
+  return buildNutritionPrompt(
+    "Con toda la información recopilada, armá un plan de acción inicial para 7 días. " +
+      "Debe estar alineado al objetivo del usuario y al sistema F45. " +
+      "Incluí: diagnóstico breve, micro ajustes (3-6), guía de proteína e hidratación, timing alrededor del entrenamiento, " +
+      "y cerrá con una acción concreta para esta semana. Si corresponde, sugerí Antropometría.",
+    profile
+  );
 }
 
 // ======================
@@ -661,7 +678,7 @@ app.post("/webhook", async (req, res) => {
 
     logInfo(`📩 ${waId}: ${text}`);
 
-    // MENU command
+    // Volver al menú principal (en cualquier momento)
     if (isMenuCommand(text)) {
       resetToMenu(waId);
       await sendLongText(waId, formatMenuText());
@@ -778,20 +795,18 @@ app.post("/webhook", async (req, res) => {
           return;
         }
         state.nutritionProfile.sex = sx;
-        state.nutritionStep = "base_inbody";
+        state.nutritionStep = "base_anthro";
         userState.set(waId, state);
-        await sendText(waId, "¿Cuándo fue tu última InBody? (ej: 'hace 3 semanas', 'enero 2026', o 'no tengo')");
+        await sendText(waId, "¿Cuándo fue tu última Antropometría? (ej: 'hace 3 semanas', 'enero 2026', o 'no tengo')");
         return;
       }
 
-      // Datos base: InBody
-      if (step === "base_inbody") {
-        state.nutritionProfile.lastInbody = text.trim();
-
-        if (saysNoInbody(text)) {
-          state.nutritionProfile.flags.suggestInbodyIn7Days = true;
+      // Datos base: Antropometría
+      if (step === "base_anthro") {
+        state.nutritionProfile.lastAnthro = text.trim();
+        if (saysNoAnthro(text)) {
+          state.nutritionProfile.flags.suggestAnthroIn7Days = true;
         }
-
         state.nutritionStep = "base_bf";
         userState.set(waId, state);
         await sendText(waId, "¿Sabés tu % de grasa? (si no, respondé 'no')");
@@ -801,7 +816,7 @@ app.post("/webhook", async (req, res) => {
       // Datos base: % grasa (opcional)
       if (step === "base_bf") {
         const t = normalizeText(text);
-        if (t !== "no" && t !== "nop" && t !== "no se" && t !== "no sé" && t !== "nose") {
+        if (!(t === "no" || t === "nop" || t === "no se" || t === "no sé" || t === "nose")) {
           const bf = parseBodyFatPercent(text);
           if (!bf) {
             await sendText(waId, "Si lo sabés, pasame un número (ej: 18 o 22.5). Si no, respondé 'no'.");
@@ -815,25 +830,26 @@ app.post("/webhook", async (req, res) => {
 
         await sendText(
           waId,
-          "Perfecto ✅ Onboarding completo.\n\nAhora, para afinar el plan, te hago unas preguntas rápidas:\n1) ¿Cuánta proteína dirías que comés por día? (baja/media/alta o ejemplos)\n2) ¿Cuánta agua tomás por día?\n3) ¿Alcohol? (nunca / 1-2 veces semana / más)\n4) ¿Te da hambre o picoteo nocturno?\n5) ¿Cómo llegás al entrenamiento: con energía o sin energía?"
+          "Perfecto ✅ Onboarding completo.\n\nAhora, para afinar el plan, respondeme estas preguntas rápidas (en un solo mensaje si podés):\n" +
+          "1) ¿Cuánta proteína dirías que comés por día? (baja/media/alta o ejemplos)\n" +
+          "2) ¿Cuánta agua tomás por día?\n" +
+          "3) ¿Alcohol? (nunca / 1-2 veces semana / más)\n" +
+          "4) ¿Tenés hambre o picoteo nocturno?\n" +
+          "5) ¿Cómo llegás al entrenamiento: con energía o sin energía?"
         );
         return;
       }
 
-      // Paso 3: análisis nutricional (en base a respuestas libres)
+      // Paso 3: análisis nutricional (guardar + disparar plan automático)
       if (step === "analysis") {
-        // Guardamos un resumen simple del usuario (para contexto en el prompt)
-        // (Si querés luego, lo parseamos en flags reales)
         state.nutritionProfile.analysisNotes = text.trim();
         state.nutritionStep = "done";
         userState.set(waId, state);
 
-        // Primer plan / respuesta basada en el sistema + perfil
-        const reply = await askGeminiTextWithRetry(buildNutritionPrompt(
-          "En base a mis datos y respuestas del análisis, armame el plan inicial con micro ajustes para esta semana.",
-          state.nutritionProfile
-        ));
-        await sendLongText(waId, reply);
+        await sendText(waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
+
+        const plan = await askGeminiTextWithRetry(buildInitialNutritionPlanPrompt(state.nutritionProfile));
+        await sendLongText(waId, plan);
         return;
       }
 
@@ -844,7 +860,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ======================
-    // GYM FLOW (tu lógica original)
+    // GYM FLOW
     // ======================
 
     // 1) PRECIOS
