@@ -277,7 +277,8 @@ async function sendLongText(to, text) {
 // Estructura esperada: secciones con encabezados tipo:
 // ## NEUROTIPO GABA-G (....)
 // y otras secciones con ## ...
-const NUTRITION_GUIDE_PATH = path.join(process.cwd(), "knowledge", "guia-nutricion.md");
+
+const NUTRITION_GUIDE_PATH = path.join(process.cwd(), "guia-nutricion.md");
 
 let GUIDE_TEXT = "";
 let GUIDE_CHUNKS = []; // [{ id, title, text }]
