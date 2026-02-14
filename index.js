@@ -1,23 +1,7 @@
 import express from "express";
 import path from "node:path";
 
-import {
-  logInfo,
-  logError,
-  safeRead,
-  sleep,
-  extractRetryDelaySeconds,
-  normalizeText,
-  splitForWhatsApp,
-  whatsappSafeText,
-} from "./utils.js";
-
-import {
-  sendText,
-  sendImage,
-  sendLongText,
-} from "./whatsapp.js";
-
+import { sendText, sendImage, sendLongText } from "./whatsapp.js";
 import {
   isAskingPrices,
   isAskingClasses,
@@ -54,6 +38,9 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onrender.com").replace(/\/$/, "");
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
+function logInfo(...args) { if (LOG_LEVEL !== "quiet") console.log(...args); }
+function logError(...args) { console.error(...args); }
+
 const app = express();
 app.use(express.json());
 
@@ -75,8 +62,8 @@ app.get("/health", (req, res) => {
       hasVerifyToken: !!VERIFY_TOKEN,
       hasWhatsappToken: !!WHATSAPP_TOKEN,
       hasPhoneNumberId: !!PHONE_NUMBER_ID,
-      // gemini key lo valida nutritionFlow internamente
-    },
+      hasGeminiKey: !!process.env.GEMINI_API_KEY
+    }
   });
 });
 
@@ -89,7 +76,7 @@ app.get("/webhook", (req, res) => {
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    logInfo(LOG_LEVEL, "✅ Webhook verificado OK");
+    logInfo("✅ Webhook verificado OK");
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
@@ -115,83 +102,81 @@ app.post("/webhook", async (req, res) => {
     const text = message?.text?.body || "";
     if (!text.trim()) return;
 
-    logInfo(LOG_LEVEL, `📩 ${waId}: ${text}`);
+    logInfo(`📩 ${waId}: ${text}`);
 
-    // 0) MENU COMMAND
+    const api = { PHONE_NUMBER_ID, WHATSAPP_TOKEN };
+
+    // MENU COMMAND
     if (isMenuCommand(text)) {
       resetToMenu(waId);
-      await sendLongText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, formatMenuText(), 1400);
+      await sendLongText(api, waId, formatMenuText(), 1400);
       return;
     }
 
     const state = getState(waId);
 
-    // 1) Si estamos en menu: decidir rama
+    // MENU: decidir rama
     if (state.flow === "menu") {
-      // Auto-disparo nutrición si el mensaje inicial suena a nutrición
       if (shouldAutoStartNutrition(text)) {
-        await handleNutritionMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
+        await handleNutritionMessage(api, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
         return;
       }
 
-      // Si suena a gym, seguimos con gym. Si no, mostramos menú.
       if (!isGymIntent(text)) {
-        await sendLongText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, formatMenuText(), 1400);
+        await sendLongText(api, waId, formatMenuText(), 1400);
         return;
       }
+
       state.flow = "gym";
     }
 
-    // 2) Si estamos en nutrición, delegar TODO ahí
+    // NUTRITION FLOW
     if (state.flow === "nutrition") {
-      await handleNutritionMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
+      await handleNutritionMessage(api, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
       return;
     }
 
-    // 3) GYM FLOW
+    // GYM FLOW
     if (isAskingPrices(text)) {
-      await sendLongText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, formatPlansText(), 1400);
-      if (PLANS_IMAGE_URL) await sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, PLANS_IMAGE_URL, "Planes disponibles");
+      await sendLongText(api, waId, formatPlansText(), 1400);
+      if (PLANS_IMAGE_URL) await sendImage(api, waId, PLANS_IMAGE_URL, "Planes disponibles");
       return;
     }
 
     if (isAskingClasses(text)) {
-      await sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, "Decime qué clase te interesa (Funcional / Zumba / etc.) y te paso días y horarios.");
-      if (CLASSES_IMAGE_URL) await sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, CLASSES_IMAGE_URL, "Grilla de clases");
+      await sendText(api, waId, "Decime qué clase te interesa (Funcional / Zumba / etc.) y te paso días y horarios.");
+      if (CLASSES_IMAGE_URL) await sendImage(api, waId, CLASSES_IMAGE_URL, "Grilla de clases");
       return;
     }
 
-    // Imagen pedida sin ejercicio: usa el último ejercicio guardado en nutritionFlow (shared map) o simple fallback
     if (wantsImage(text) && !isExerciseIntent(text)) {
-      // en este refactor lo dejamos simple: pedir ejercicio exacto
-      await sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, "Dale. Decime el ejercicio exacto (por ejemplo: 'vuelos laterales') y te genero la imagen.");
+      await sendText(api, waId, "Dale. Decime el ejercicio exacto (por ejemplo: 'vuelos laterales') y te genero la imagen.");
       return;
     }
 
-    // Ejercicios + imagen
     if (isExerciseIntent(text)) {
-      // explicación con Gemini la dejamos en nutritionFlow? -> no, en este refactor mantenemos minimal: solo imagen + CTA.
-      // Si querés, después lo movemos a gymCoachFlow.js.
-      await sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, "Perfecto. Si querés una imagen, decime: 'mostrame una imagen'.");
-      if (wantsImage(text)) {
-        try {
-          await sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, "Generando imagen descriptiva...");
-          const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
-          const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
-          await sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, imgUrl, "Ejecución correcta (referencia)");
-        } catch (e) {
-          logError(LOG_LEVEL, "❌ Error generando imagen:", e?.message || e);
-          await sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, "La imagen falló. Probá de nuevo en 1 minuto.");
-        }
+      if (!wantsImage(text)) {
+        await sendText(api, waId, "Perfecto. Si querés una imagen, decime: 'mostrame una imagen' + el ejercicio.");
+        return;
+      }
+
+      try {
+        await sendText(api, waId, "Generando imagen descriptiva...");
+        const filename = await generateExerciseImageAndSave(buildExerciseImagePrompt(text));
+        const imgUrl = `${PUBLIC_BASE_URL}/img/${filename}`;
+        await sendImage(api, waId, imgUrl, "Ejecución correcta (referencia)");
+      } catch (e) {
+        logError("❌ Error generando imagen:", e?.message || e);
+        await sendText(api, waId, "La imagen falló. Probá de nuevo en 1 minuto.");
       }
       return;
     }
 
-    // Default: mostrar menú (más claro)
-    await sendLongText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, waId, formatMenuText(), 1400);
+    // Default
+    await sendLongText(api, waId, formatMenuText(), 1400);
 
   } catch (err) {
-    logError(LOG_LEVEL, "❌ Error webhook:", err);
+    logError("❌ Error webhook:", err);
   }
 });
 
@@ -200,6 +185,6 @@ app.post("/webhook", async (req, res) => {
 // ======================
 const port = process.env.PORT || 1000;
 app.listen(port, "0.0.0.0", () => {
-  logInfo(LOG_LEVEL, `🚀 Server on port ${port}`);
-  logInfo(LOG_LEVEL, "✅ Public base URL:", PUBLIC_BASE_URL);
+  logInfo(`🚀 Server on port ${port}`);
+  logInfo("✅ Public base URL:", PUBLIC_BASE_URL);
 });
