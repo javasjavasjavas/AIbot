@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { sendText, sendLongText } from "./whatsapp.js";
 
 // ENV
@@ -84,7 +82,6 @@ export function formatMenuText() {
 
 export function shouldAutoStartNutrition(text) {
   const t = normalizeText(text);
-
   const strong = [
     "nutricion", "nutrición", "dieta", "comida", "alimentacion", "alimentación",
     "bajar de peso", "perder peso", "bajar grasa", "perder grasa", "definicion", "definición",
@@ -95,38 +92,12 @@ export function shouldAutoStartNutrition(text) {
 
   const wants = t.includes("quiero") || t.includes("necesito") || t.includes("me gustaria") || t.includes("me gustaría");
   const goals = ["bajar", "perder", "definir", "marcar", "volumen", "musculo", "músculo", "rendimiento", "salud"];
-  if (wants && goals.some(g => t.includes(g))) return true;
-
-  return false;
-}
-
-// NUTRITION SYSTEM PROMPT
-const NUTRITION_SYSTEM_PATH = path.join(process.cwd(), "nutricion-system.md");
-let NUTRITION_SYSTEM_PROMPT = "";
-
-function logInfo(level, ...args) { if (level !== "quiet") console.log(...args); }
-function logError(level, ...args) { console.error(...args); }
-
-function loadNutritionSystemPrompt(level) {
-  try {
-    if (!fs.existsSync(NUTRITION_SYSTEM_PATH)) {
-      NUTRITION_SYSTEM_PROMPT = "";
-      logError(level, "❌ No se encontró nutricion-system.md en:", NUTRITION_SYSTEM_PATH);
-      return;
-    }
-    NUTRITION_SYSTEM_PROMPT = fs.readFileSync(NUTRITION_SYSTEM_PATH, "utf-8").trim();
-    NUTRITION_SYSTEM_PROMPT = NUTRITION_SYSTEM_PROMPT.replace(/InBody/gi, "Antropometría");
-    logInfo(level, "🧠 nutricion-system.md cargado OK. chars:", NUTRITION_SYSTEM_PROMPT.length);
-  } catch (e) {
-    NUTRITION_SYSTEM_PROMPT = "";
-    logError(level, "❌ Error cargando nutricion-system.md:", e?.message || e);
-  }
+  return wants && goals.some(g => t.includes(g));
 }
 
 // PARSERS
 function parseObjective(text) {
   const t = normalizeText(text);
-
   if (["a", "b", "c", "d", "e"].includes(t)) return t.toUpperCase();
 
   if (t.includes("grasa") || t.includes("bajar") || t.includes("perder peso") || t.includes("definir") || t.includes("marcar")) return "A";
@@ -202,7 +173,7 @@ function objectiveLabel(obj) {
   }
 }
 
-// GEMINI
+// GEMINI JSON
 async function safeRead(r) {
   try { return await r.json(); } catch { return await r.text(); }
 }
@@ -225,7 +196,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function callGemini(prompt, { responseMimeType, maxOutputTokens = 900, temperature = 0.3 } = {}) {
+async function callGemini(prompt, { responseMimeType, maxOutputTokens = 650, temperature = 0.0 } = {}) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -264,83 +235,77 @@ function safeJsonParse(s) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
-async function repairJsonWithGemini(badJsonText) {
-  const prompt = `
-Devolvé SOLO JSON VÁLIDO (sin markdown, sin texto extra).
-Repará este JSON roto/incompleto manteniendo el mismo esquema y el contenido lo más fiel posible:
-
-${badJsonText}
-`.trim();
-
-  const fixed = await callGemini(prompt, {
-    responseMimeType: "application/json",
-    temperature: 0.0,
-    maxOutputTokens: 600
-  });
-
-  return fixed;
-}
-
 async function askGeminiJsonWithRetry(prompt, level, maxAttempts = 3) {
-  let lastRaw = "";
-
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const raw = await callGemini(prompt, {
         responseMimeType: "application/json",
         temperature: 0.0,
-        maxOutputTokens: 700
+        maxOutputTokens: 650
       });
-
-      lastRaw = raw;
 
       const obj = safeJsonParse(raw);
       if (obj) return obj;
 
-      const repairedRaw = await repairJsonWithGemini(raw);
+      // reparación simple: pedir JSON válido
+      const repairedRaw = await callGemini(
+        `Devolvé SOLO JSON VÁLIDO (sin texto extra). Repará este JSON:\n\n${raw}`,
+        { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 650 }
+      );
+
       const repairedObj = safeJsonParse(repairedRaw);
       if (repairedObj) return repairedObj;
 
-      logError(level, "⚠️ JSON no parseable. Intento:", attempt, "raw head:", raw.slice(0, 200));
     } catch (e) {
       const code = e?.code;
       if (code === 429 && attempt < maxAttempts) {
         const retryS = extractRetryDelaySeconds(e?.data?.error) ?? (8 * attempt);
-        logError(level, "⚠️ Gemini 429 (json). Reintento en", retryS, "s");
+        console.error("⚠️ Gemini 429 (json). Reintento en", retryS, "s");
         await sleep((retryS + 1) * 1000);
         continue;
       }
-      logError(level, "❌ Gemini json error:", e?.message || e);
+      console.error("❌ Gemini json error:", e?.message || e);
     }
   }
-
-  logError(level, "❌ JSON plan failed after retries. lastRaw head:", (lastRaw || "").slice(0, 200));
   return null;
 }
 
-// PROMPT + FORMAT
+// PROMPT sin md
 function buildNutritionJsonPlanPrompt(profile) {
-  const sys = (NUTRITION_SYSTEM_PROMPT || "").trim();
-
   return `
-${sys}
+Sos el Asistente Nutricional Oficial de F45.
+Estilo: técnico, claro, motivador. Sin saludos.
 
-Contexto del usuario (onboarding F45):
+Reglas:
+- No reemplazas a un nutricionista clínico.
+- No prescribes dietas médicas ni tratamientos.
+- No haces diagnósticos.
+- Trabajas sobre hábitos, macros, timing, hidratación, sueño y adherencia.
+- Recomendas Antropometría cada 4-6 semanas.
+- Si hay condiciones médicas, TCA, embarazo, medicación metabólica o casos complejos: sugerí derivación.
+
+Prioridades:
+1) Proteína adecuada diaria.
+2) Calidad alimentaria.
+3) Hidratación.
+4) Energía suficiente para entrenar fuerte.
+5) Consistencia > perfección.
+
+Contexto del usuario:
 - Objetivo: ${profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido"}
 - Peso: ${profile.weightKg ?? "N/A"} kg
 - Altura: ${profile.heightCm ?? "N/A"} cm
 - Edad: ${profile.age ?? "N/A"}
 - Sexo: ${profile.sex ?? "N/A"}
 - Última Antropometría: ${profile.lastAnthro ?? "N/A"}
-- % grasa (si sabe): ${profile.bodyFatPercent ?? "N/A"}
-- Respuestas análisis nutricional: ${profile.analysisNotes ?? "N/A"}
-- Flag sugerir Antropometría en 7 días: ${profile.flags?.suggestAnthroIn7Days ? "SI" : "NO"}
+- % grasa: ${profile.bodyFatPercent ?? "N/A"}
+- Hábitos reportados: ${profile.analysisNotes ?? "N/A"}
+- ¿Sugerir Antropometría en 7 días?: ${profile.flags?.suggestAnthroIn7Days ? "SI" : "NO"}
 
 Tarea:
-Genera un plan inicial para 7 días.
+Genera un plan inicial para 7 días. Corto y accionable.
 
-Salida:
-DEVOLVÉ SOLO JSON VÁLIDO, sin texto extra, sin markdown, sin comentarios.
+DEVOLVÉ SOLO JSON VÁLIDO, sin texto extra, sin markdown.
 
 Esquema JSON:
 {
@@ -356,83 +321,51 @@ Esquema JSON:
 
 Reglas duras:
 - NO te presentes. NO saludes.
-- Todo debe ser corto y accionable.
 - micro_ajustes: 3 a 6 ítems.
 - timing_entreno: 1 a 2 ítems.
 - hidratacion: 1 a 2 ítems.
 `.trim();
 }
 
-function formatPlanFromJson(obj) {
-  const lines = [];
-  const diag = obj?.diagnostico_breve || "";
-  const micro = Array.isArray(obj?.micro_ajustes) ? obj.micro_ajustes.filter(Boolean) : [];
-  const timing = Array.isArray(obj?.timing_entreno) ? obj.timing_entreno.filter(Boolean) : [];
-  const hidr = Array.isArray(obj?.hidratacion) ? obj.hidratacion.filter(Boolean) : [];
-  const accion = obj?.accion_semana || "";
-  const f45 = obj?.recordatorio_f45 || "";
-  const ant = obj?.sugerir_antropometria || "";
-  const der = obj?.derivacion || "";
+// Envío por secciones para evitar cortes
+async function sendPlanInSections(api, waId, planObj) {
+  const diag = planObj?.diagnostico_breve || "";
+  const micro = Array.isArray(planObj?.micro_ajustes) ? planObj.micro_ajustes.filter(Boolean) : [];
+  const timing = Array.isArray(planObj?.timing_entreno) ? planObj.timing_entreno.filter(Boolean) : [];
+  const hidr = Array.isArray(planObj?.hidratacion) ? planObj.hidratacion.filter(Boolean) : [];
+  const accion = planObj?.accion_semana || "";
+  const f45 = planObj?.recordatorio_f45 || "";
+  const ant = planObj?.sugerir_antropometria || "";
+  const der = planObj?.derivacion || "";
 
-  if (diag) {
-    lines.push("Diagnóstico breve:");
-    lines.push(diag);
-    lines.push("");
-  }
+  if (diag) await sendLongText(api, waId, `Diagnóstico breve:\n${diag}`, 900);
 
   if (micro.length) {
-    lines.push("Micro ajustes concretos:");
-    for (const m of micro) lines.push(`- ${m}`);
-    lines.push("");
+    await sendLongText(api, waId, `Micro ajustes (7 días):\n${micro.map(m => `- ${m}`).join("\n")}`, 900);
   }
 
   if (timing.length) {
-    lines.push("Timing alrededor del entrenamiento:");
-    for (const t of timing) lines.push(`- ${t}`);
-    lines.push("");
+    await sendLongText(api, waId, `Timing alrededor del entrenamiento:\n${timing.map(t => `- ${t}`).join("\n")}`, 900);
   }
 
   if (hidr.length) {
-    lines.push("Hidratación:");
-    for (const h of hidr) lines.push(`- ${h}`);
-    lines.push("");
+    await sendLongText(api, waId, `Hidratación:\n${hidr.map(h => `- ${h}`).join("\n")}`, 900);
   }
 
-  if (accion) {
-    lines.push("Acción concreta para esta semana:");
-    lines.push(accion);
-    lines.push("");
-  }
+  if (accion) await sendLongText(api, waId, `Acción concreta para esta semana:\n${accion}`, 900);
+  if (f45) await sendLongText(api, waId, `F45:\n${f45}`, 900);
 
-  if (f45) {
-    lines.push("F45:");
-    lines.push(f45);
-    lines.push("");
-  }
-
-  if (ant) {
-    lines.push("Antropometría:");
-    lines.push(ant);
-    lines.push("");
-  }
-
-  if (der) {
-    lines.push("Derivación sugerida:");
-    lines.push(der);
-    lines.push("");
-  }
-
-  return lines.join("\n").trim();
+  if (ant) await sendLongText(api, waId, `Antropometría:\n${ant}`, 900);
+  if (der) await sendLongText(api, waId, `Derivación sugerida:\n${der}`, 900);
 }
 
 // MAIN HANDLER
 export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}) {
   const level = LOG_LEVEL || LOG_LEVEL_DEFAULT;
-  loadNutritionSystemPrompt(level);
 
   const state = getState(waId);
 
-  // Si estamos en menu y pidieron nutrición (o auto)
+  // menu -> start nutrition
   if (state.flow === "menu") {
     const t = normalizeText(text);
 
@@ -447,11 +380,10 @@ export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}
       return;
     }
 
-    await sendLongText(api, waId, formatMenuText(), 1400);
+    await sendLongText(api, waId, formatMenuText(), 900);
     return;
   }
 
-  // Asegurar flow en nutrition
   if (state.flow !== "nutrition") {
     state.flow = "nutrition";
     state.nutritionStep = state.nutritionStep || "objective";
@@ -572,14 +504,13 @@ export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}
 
     const planObj = await askGeminiJsonWithRetry(buildNutritionJsonPlanPrompt(state.nutritionProfile), level);
     if (!planObj) {
-      await sendText(api, waId, "Tuve un problema generando el plan completo. Probemos de nuevo: respondé 'reintentar plan'.");
+      await sendText(api, waId, "Tuve un problema generando el plan. Probemos de nuevo: respondé 'reintentar plan'.");
       return;
     }
 
-    const planText = formatPlanFromJson(planObj);
-    await sendLongText(api, waId, planText, 1400);
+    await sendPlanInSections(api, waId, planObj);
     return;
   }
 
-  await sendLongText(api, waId, "Listo. Si querés volver al menú: escribí 'volver al menu principal'.", 1400);
+  await sendLongText(api, waId, "Listo. Si querés volver al menú: escribí 'volver al menu principal'.", 900);
 }
