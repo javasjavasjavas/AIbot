@@ -1,16 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { sendText, sendLongText } from "./whatsapp.js";
 
-// ======================
 // ENV
-// ======================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
 const LOG_LEVEL_DEFAULT = process.env.LOG_LEVEL || "info";
 
-// ======================
 // STATE
-// ======================
 const userState = new Map();
 
 export function getState(waId) {
@@ -60,9 +57,7 @@ function normalizeText(s) {
     .trim();
 }
 
-// ======================
 // MENU
-// ======================
 export function isMenuCommand(text) {
   const t = normalizeText(text);
   return (
@@ -105,19 +100,12 @@ export function shouldAutoStartNutrition(text) {
   return false;
 }
 
-// ======================
 // NUTRITION SYSTEM PROMPT
-// ======================
 const NUTRITION_SYSTEM_PATH = path.join(process.cwd(), "nutricion-system.md");
 let NUTRITION_SYSTEM_PROMPT = "";
 
-function logInfo(level, ...args) {
-  if (level === "quiet") return;
-  console.log(...args);
-}
-function logError(level, ...args) {
-  console.error(...args);
-}
+function logInfo(level, ...args) { if (level !== "quiet") console.log(...args); }
+function logError(level, ...args) { console.error(...args); }
 
 function loadNutritionSystemPrompt(level) {
   try {
@@ -135,9 +123,7 @@ function loadNutritionSystemPrompt(level) {
   }
 }
 
-// ======================
 // PARSERS
-// ======================
 function parseObjective(text) {
   const t = normalizeText(text);
 
@@ -216,9 +202,7 @@ function objectiveLabel(obj) {
   }
 }
 
-// ======================
-// GEMINI (JSON SAFE)
-// ======================
+// GEMINI
 async function safeRead(r) {
   try { return await r.json(); } catch { return await r.text(); }
 }
@@ -334,9 +318,7 @@ async function askGeminiJsonWithRetry(prompt, level, maxAttempts = 3) {
   return null;
 }
 
-// ======================
 // PROMPT + FORMAT
-// ======================
 function buildNutritionJsonPlanPrompt(profile) {
   const sys = (NUTRITION_SYSTEM_PROMPT || "").trim();
 
@@ -443,117 +425,22 @@ function formatPlanFromJson(obj) {
   return lines.join("\n").trim();
 }
 
-// ======================
-// WhatsApp senders (mini)
-// ======================
-async function sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, text) {
-  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text }
-    })
-  });
-
-  if (!r.ok) {
-    const body = await safeRead(r);
-    throw new Error(`sendText failed ${r.status}: ${JSON.stringify(body)}`);
-  }
-}
-
-function whatsappSafeText(text) {
-  return (text || "")
-    .replace(/###/g, "")
-    .replace(/\*\*/g, "*")
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .trim();
-}
-
-function splitForWhatsApp(text, maxLen = 1400) {
-  const t = whatsappSafeText(text);
-  if (t.length <= maxLen) return [t];
-
-  const paragraphs = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
-
-  const parts = [];
-  let current = "";
-
-  const pushCurrent = () => {
-    if (current.trim()) parts.push(current.trim());
-    current = "";
-  };
-
-  for (const p of paragraphs) {
-    if (p.length > maxLen) {
-      const sentences = p.split(/(?<=[.!?])\s+/);
-      for (const s of sentences) {
-        if ((current + " " + s).trim().length > maxLen) pushCurrent();
-        current = (current ? current + " " : "") + s;
-      }
-      pushCurrent();
-      continue;
-    }
-
-    const candidate = (current ? current + "\n\n" : "") + p;
-    if (candidate.length > maxLen) {
-      pushCurrent();
-      current = p;
-    } else {
-      current = candidate;
-    }
-  }
-
-  pushCurrent();
-  return parts.length ? parts : [t.slice(0, maxLen)];
-}
-
-async function sendLongText(api, to, text, maxLen = 1400) {
-  const chunks = splitForWhatsApp(text, maxLen);
-  if (chunks.length === 1) {
-    await sendText(api, to, chunks[0]);
-    return;
-  }
-  for (let i = 0; i < chunks.length; i++) {
-    await sendText(api, to, `(${i + 1}/${chunks.length}) ${chunks[i]}`);
-  }
-}
-
-// ======================
 // MAIN HANDLER
-// ======================
 export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}) {
   const level = LOG_LEVEL || LOG_LEVEL_DEFAULT;
   loadNutritionSystemPrompt(level);
 
   const state = getState(waId);
 
-  // Si llega "nutrición" en el menú, arranca el flow
+  // Si estamos en menu y pidieron nutrición (o auto)
   if (state.flow === "menu") {
     const t = normalizeText(text);
-    if (t.includes("nutri")) {
-      state.flow = "nutrition";
-      state.nutritionStep = "objective";
-      userState.set(waId, state);
-      await sendText(api, waId,
-        "Perfecto. Arranquemos el onboarding nutricional F45.\n\nPaso 1: ¿Cuál es tu objetivo principal?\nA) Pérdida de grasa\nB) Ganancia muscular\nC) Recomposición\nD) Rendimiento\nE) Salud general\n\nRespondé con la letra (A-E) o con una frase (ej: 'bajar grasa')."
-      );
-      return;
-    }
 
-    // auto-start si suena a nutrición
-    if (shouldAutoStartNutrition(text)) {
+    if (t.includes("nutri") || shouldAutoStartNutrition(text)) {
       state.flow = "nutrition";
       state.nutritionStep = "objective";
       userState.set(waId, state);
+
       await sendText(api, waId,
         "Perfecto. Arranquemos el onboarding nutricional F45.\n\nPaso 1: ¿Cuál es tu objetivo principal?\nA) Pérdida de grasa\nB) Ganancia muscular\nC) Recomposición\nD) Rendimiento\nE) Salud general\n\nRespondé con la letra (A-E) o con una frase (ej: 'bajar grasa')."
       );
@@ -684,7 +571,6 @@ export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}
     await sendText(api, waId, "Acá va tu plan inicial (7 días):");
 
     const planObj = await askGeminiJsonWithRetry(buildNutritionJsonPlanPrompt(state.nutritionProfile), level);
-
     if (!planObj) {
       await sendText(api, waId, "Tuve un problema generando el plan completo. Probemos de nuevo: respondé 'reintentar plan'.");
       return;
@@ -695,6 +581,5 @@ export async function handleNutritionMessage(api, waId, text, { LOG_LEVEL } = {}
     return;
   }
 
-  // done: por ahora devolvemos menú
   await sendLongText(api, waId, "Listo. Si querés volver al menú: escribí 'volver al menu principal'.", 1400);
 }
