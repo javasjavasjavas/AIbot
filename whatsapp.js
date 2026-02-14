@@ -54,6 +54,10 @@ export function splitForWhatsApp(text, maxLen = 900) {
   return parts.length ? parts : [t.slice(0, maxLen)];
 }
 
+if (process.env.LOG_LEVEL === "debug") {
+  console.log("➡️ sendText len:", (text || "").length);
+}
+
 export async function sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, text) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
   const r = await fetch(url, {
