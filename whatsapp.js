@@ -11,41 +11,46 @@ export function whatsappSafeText(text) {
     .trim();
 }
 
-export function splitForWhatsApp(text, maxLen = 1400) {
+// Split MUY seguro para WhatsApp (900 chars)
+export function splitForWhatsApp(text, maxLen = 900) {
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
-
-  const paragraphs = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
 
   const parts = [];
   let current = "";
 
-  const pushCurrent = () => {
-    if (current.trim()) parts.push(current.trim());
+  const push = () => {
+    const c = (current || "").trim();
+    if (c) parts.push(c);
     current = "";
   };
 
-  for (const p of paragraphs) {
-    if (p.length > maxLen) {
-      const sentences = p.split(/(?<=[.!?])\s+/);
+  // Partimos por líneas primero
+  const lines = t.split("\n");
+
+  for (const line of lines) {
+    // si una línea es gigante, la partimos por oraciones
+    if (line.length > maxLen) {
+      const sentences = line.split(/(?<=[.!?])\s+/);
       for (const s of sentences) {
-        if ((current + " " + s).trim().length > maxLen) pushCurrent();
+        const candidate = (current ? current + " " : "") + s;
+        if (candidate.length > maxLen) push();
         current = (current ? current + " " : "") + s;
       }
-      pushCurrent();
+      push();
       continue;
     }
 
-    const candidate = (current ? current + "\n\n" : "") + p;
+    const candidate = (current ? current + "\n" : "") + line;
     if (candidate.length > maxLen) {
-      pushCurrent();
-      current = p;
+      push();
+      current = line;
     } else {
       current = candidate;
     }
   }
 
-  pushCurrent();
+  push();
   return parts.length ? parts : [t.slice(0, maxLen)];
 }
 
@@ -93,7 +98,8 @@ export async function sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, imageUr
   }
 }
 
-export async function sendLongText(api, to, text, maxLen = 1400) {
+// default maxLen 900 para evitar cortes
+export async function sendLongText(api, to, text, maxLen = 900) {
   const chunks = splitForWhatsApp(text, maxLen);
   if (chunks.length === 1) {
     await sendText(api, to, chunks[0]);
