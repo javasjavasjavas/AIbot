@@ -103,6 +103,7 @@ function loadNutritionSystemPrompt() {
       return;
     }
     NUTRITION_SYSTEM_PROMPT = fs.readFileSync(NUTRITION_SYSTEM_PATH, "utf-8").trim();
+    // Reemplazo defensivo
     NUTRITION_SYSTEM_PROMPT = NUTRITION_SYSTEM_PROMPT.replace(/InBody/gi, "Antropometría");
     logInfo("🧠 nutricion-system.md cargado OK. chars:", NUTRITION_SYSTEM_PROMPT.length);
   } catch (e) {
@@ -193,8 +194,8 @@ function whatsappSafeText(text) {
     .trim();
 }
 
-function splitForWhatsApp(text, maxLen = 1800) {
-  // 👈 bajamos a 1800 para más margen y menos “recortes raros” de WhatsApp/cliente
+// Split por párrafos y oraciones
+function splitForWhatsApp(text, maxLen = 1400) {
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
 
@@ -282,7 +283,7 @@ async function sendImage(to, imageUrl, caption) {
 }
 
 async function sendLongText(to, text) {
-  const chunks = splitForWhatsApp(text, 1800);
+  const chunks = splitForWhatsApp(text, 1400);
   if (chunks.length === 1) {
     await sendText(to, chunks[0]);
     return;
@@ -572,6 +573,9 @@ Reglas duras:
 `;
 }
 
+// ======================
+// PLAN FORMATTERS
+// ======================
 function formatPlanFromJson(obj) {
   const lines = [];
   const diag = obj?.diagnostico_breve || "";
@@ -634,96 +638,139 @@ function formatPlanFromJson(obj) {
   return lines.join("\n").trim();
 }
 
-function tryParseJsonLoose(s) {
-  if (!s) return null;
-  const raw = s.trim();
-  // a veces el modelo mete texto antes/después; intentamos recortar al primer { ... último }
-  const first = raw.indexOf("{");
-  const last = raw.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) return null;
-  const slice = raw.slice(first, last + 1);
-  try {
-    return JSON.parse(slice);
-  } catch {
-    return null;
-  }
-}
-
 // ======================
-// GEMINI TEXT (con retry)
+// GEMINI (TEXT + JSON SAFE)
 // ======================
-async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
-  if (!GEMINI_API_KEY) return "Falta configurar GEMINI_API_KEY en el servidor.";
+async function callGemini(prompt, { responseMimeType, maxOutputTokens = 900, temperature = 0.3 } = {}) {
+  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 900,
-          topP: 0.9
-        }
-      })
-    });
-
-    const data = await safeRead(response);
-
-    if (response.ok && !data?.error) {
-      return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No pude generar una respuesta clara.";
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature,
+      maxOutputTokens,
+      topP: 0.9,
+      ...(responseMimeType ? { responseMimeType } : {})
     }
+  };
 
-    const code = data?.error?.code || response.status;
-    if (code === 429 && attempt < maxAttempts) {
-      const retryS = extractRetryDelaySeconds(data?.error) ?? (8 * attempt);
-      logError("⚠️ Gemini 429 (texto). Reintento en", retryS, "s");
-      await sleep((retryS + 1) * 1000);
-      continue;
-    }
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
 
-    logError("❌ Gemini text error:", code, data?.error?.message || data);
-    return "Tuve un problema al responder. Probá de nuevo en un momento.";
+  const data = await safeRead(r);
+
+  if (!r.ok || data?.error) {
+    const code = data?.error?.code || r.status;
+    const msg = data?.error?.message || JSON.stringify(data);
+    const err = new Error(`Gemini error ${code}: ${msg}`);
+    err.code = code;
+    err.data = data;
+    throw err;
   }
 
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+}
+
+async function askGeminiTextWithRetry(prompt, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await callGemini(prompt, { temperature: 0.4, maxOutputTokens: 900 });
+    } catch (e) {
+      const code = e?.code;
+      if (code === 429 && attempt < maxAttempts) {
+        const retryS = extractRetryDelaySeconds(e?.data?.error) ?? (8 * attempt);
+        logError("⚠️ Gemini 429 (texto). Reintento en", retryS, "s");
+        await sleep((retryS + 1) * 1000);
+        continue;
+      }
+      logError("❌ Gemini text error:", e?.message || e);
+      return "Tuve un problema al responder. Probá de nuevo en un momento.";
+    }
+  }
   return "Estoy con mucha demanda ahora. Probá en un minuto.";
 }
 
-// ======================
-// GEMINI IMAGE
-// ======================
-async function generateExerciseImageAndSave(imagePrompt) {
-  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
+function safeJsonParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
+}
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+async function repairJsonWithGemini(badJsonText) {
+  const prompt = `
+Devolvé SOLO JSON VÁLIDO (sin markdown, sin texto extra).
+Repará este JSON roto/incompleto manteniendo el mismo esquema y el contenido lo más fiel posible:
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: imagePrompt }] }]
-    })
+${badJsonText}
+`.trim();
+
+  const fixed = await callGemini(prompt, {
+    responseMimeType: "application/json",
+    temperature: 0.0,
+    maxOutputTokens: 600
   });
+  return fixed;
+}
 
-  const data = await safeRead(response);
+async function askGeminiJsonWithRetry(prompt, maxAttempts = 3) {
+  let lastRaw = "";
 
-  if (!response.ok || data?.error) {
-    throw new Error(data?.error?.message || `Image gen failed (${response.status})`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const raw = await callGemini(prompt, {
+        responseMimeType: "application/json",
+        temperature: 0.0,
+        maxOutputTokens: 700
+      });
+
+      lastRaw = raw;
+
+      const obj = safeJsonParse(raw);
+      if (obj) return obj;
+
+      const repairedRaw = await repairJsonWithGemini(raw);
+      const repairedObj = safeJsonParse(repairedRaw);
+      if (repairedObj) return repairedObj;
+
+      logError("⚠️ JSON no parseable. Intento:", attempt, "raw head:", raw.slice(0, 200));
+    } catch (e) {
+      const code = e?.code;
+      if (code === 429 && attempt < maxAttempts) {
+        const retryS = extractRetryDelaySeconds(e?.data?.error) ?? (8 * attempt);
+        logError("⚠️ Gemini 429 (json). Reintento en", retryS, "s");
+        await sleep((retryS + 1) * 1000);
+        continue;
+      }
+      logError("❌ Gemini json error:", e?.message || e);
+    }
   }
 
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.find((p) => p.inlineData?.data);
-  const b64 = inline?.inlineData?.data;
-  if (!b64) throw new Error("No inline image data returned");
+  logError("❌ JSON plan failed after retries. lastRaw head:", (lastRaw || "").slice(0, 200));
+  return null;
+}
 
-  const buffer = Buffer.from(b64, "base64");
-  const filename = `${crypto.randomBytes(12).toString("hex")}.png`;
-  fs.writeFileSync(path.join(GENERATED_DIR, filename), buffer);
+// ======================
+// INTENTS NUTRICIÓN (preguntas generales)
+// ======================
+function isNutritionIntent(text) {
+  const t = normalizeText(text);
 
-  return filename;
+  const strong = [
+    "nutricion", "nutrición", "dieta", "comida", "alimentacion", "alimentación",
+    "bajar de peso", "perder peso", "bajar grasa", "perder grasa", "definicion", "definición",
+    "macros", "calorias", "calorías", "proteina", "proteína", "carbohidratos",
+    "volumen", "ganar musculo", "ganar músculo", "rendimiento", "hidratacion", "hidratación"
+  ];
+  if (strong.some(p => t.includes(p))) return true;
+
+  const wants = t.includes("quiero") || t.includes("necesito") || t.includes("me gustaria") || t.includes("me gustaría");
+  const goals = ["bajar", "perder", "definir", "marcar", "volumen", "musculo", "músculo", "rendimiento", "salud"];
+  if (wants && goals.some(g => t.includes(g))) return true;
+
+  return false;
 }
 
 // ======================
@@ -773,11 +820,12 @@ app.post("/webhook", async (req, res) => {
     const state = getState(waId);
 
     // ======================
-    // MENU FLOW
+    // MENU FLOW (decidir rama)
     // ======================
     if (state.flow === "menu") {
       const t = normalizeText(text);
 
+      // Auto-disparo nutrición si suena a nutrición
       if (isNutritionIntent(text) && !isExerciseIntent(text)) {
         state.flow = "nutrition";
         state.nutritionStep = "objective";
@@ -789,6 +837,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      // Gym si suena a gym
       if (t.includes("gim") || isGymIntent(text)) {
         state.flow = "gym";
         userState.set(waId, state);
@@ -798,7 +847,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Si estaba en nutrition pero pregunta de gym
+    // Si estaba en nutrition pero pregunta de gym, cambiar sin fricción
     if (state.flow === "nutrition" && isGymIntent(text) && !isNutritionIntent(text)) {
       state.flow = "gym";
       userState.set(waId, state);
@@ -913,7 +962,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ PLAN: pedimos JSON para evitar truncado raro, y lo formateamos nosotros
+      // ✅ Plan JSON seguro (nunca mandamos JSON crudo)
       if (step === "analysis") {
         state.nutritionProfile.analysisNotes = text.trim();
         state.nutritionStep = "done";
@@ -922,22 +971,22 @@ app.post("/webhook", async (req, res) => {
         await sendText(waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
         await sendText(waId, "Acá va tu plan inicial (7 días):");
 
-        const raw = await askGeminiTextWithRetry(buildNutritionJsonPlanPrompt(state.nutritionProfile));
-        const obj = tryParseJsonLoose(raw);
+        const planObj = await askGeminiJsonWithRetry(buildNutritionJsonPlanPrompt(state.nutritionProfile));
 
-        if (!obj) {
-          // fallback: mandamos el texto igual, pero avisamos
-          logError("⚠️ No pude parsear JSON del plan. Raw:", raw?.slice(0, 300));
-          await sendLongText(waId, raw);
+        if (!planObj) {
+          await sendText(
+            waId,
+            "Tuve un problema generando el plan completo. Probemos de nuevo: respondé 'reintentar plan'."
+          );
           return;
         }
 
-        const planText = formatPlanFromJson(obj);
+        const planText = formatPlanFromJson(planObj);
         await sendLongText(waId, planText);
         return;
       }
 
-      // done: preguntas nutrición (mantener simple; podés luego también pasarlo a JSON si querés)
+      // done: preguntas nutrición
       const reply = await askGeminiTextWithRetry(
         `
 ${NUTRITION_SYSTEM_PROMPT}
@@ -946,7 +995,7 @@ Reglas extra:
 - No te presentes. No saludes.
 - Responde claro, técnico y accionable.
 - Hacé preguntas si faltan datos relevantes.
-- Cerrar con UNA acción concreta para la semana.
+- Cerrá con UNA acción concreta para la semana.
 - Sin markdown.
 
 Contexto del usuario:
@@ -1025,6 +1074,7 @@ Usuario: "${text}"
       return;
     }
 
+    // Default
     const defaultReply = await askGeminiTextWithRetry(
       `Sos un asistente de gimnasio. Responde en español, claro y útil, sin markdown.\nUsuario: ${text}`
     );
