@@ -1,11 +1,11 @@
 // nutritionFlow.js
 // Flow de Nutrición (onboarding + plan) - versión WhatsApp-safe
 // Cambios (SIN cambiar flow ni preguntas):
-// 1) La IA decide cantidad de comidas por día según objetivo + perfil + hábitos (no fijo 3+1)
-// 2) Plan 7 días: comidas por día + macros + kcal por comida + totales diarios (aprox)
-// 3) Mensajería WhatsApp-safe: 1 mensaje por día, y si se pasa de largo, lo parte en 2
-// 4) Lista de compras basada en el plan
-// 5) Cubre TODOS los objetivos A-E con lógica de frecuencia + timing
+// 1) Generación PRO en 2 fases: META (targets + comidas/día) + 7 días (1 llamada por día)
+// 2) Cada día devuelve comidas con ITEMS + CANTIDADES + macros/kcal por comida + totales diarios
+// 3) WhatsApp-safe: 1 mensaje por día; si un día se pasa, lo parte en 2
+// 4) Mantiene diagnóstico, entrenamiento complementario, lista de compras, antropometría/derivación
+// 5) Cubre TODOS los objetivos: A) grasa B) masa C) recomposición D) rendimiento E) salud
 
 import { sendText } from "./whatsapp.js";
 
@@ -233,7 +233,7 @@ async function safeRead(r) {
   try { return await r.json(); } catch { return await r.text(); }
 }
 
-async function callGemini(prompt, { responseMimeType, maxOutputTokens = 1400, temperature = 0.2 } = {}) {
+async function callGemini(prompt, { responseMimeType, maxOutputTokens = 4096, temperature = 0.2 } = {}) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -270,132 +270,155 @@ function safeJsonParse(s) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
-async function getPlanJson(prompt) {
-  const raw1 = await callGemini(prompt, { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 1400 });
+async function getPlanJson(prompt, { requireKeys = [] } = {}) {
+  const raw1 = await callGemini(prompt, {
+    responseMimeType: "application/json",
+    temperature: 0.2,
+    maxOutputTokens: 4096
+  });
   const obj1 = safeJsonParse(raw1);
-  if (obj1) return obj1;
+  if (obj1 && requireKeys.every(k => obj1[k] !== undefined && obj1[k] !== null)) return obj1;
 
   const raw2 = await callGemini(
-    `Devolvé SOLO JSON VÁLIDO (sin texto extra). Repará este JSON:\n\n${raw1}`,
-    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 1400 }
+    `Devolvé SOLO JSON VÁLIDO (sin texto extra). Si falta algún campo, agregalo. Repará y completá este JSON:\n\n${raw1}`,
+    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 4096 }
   );
   const obj2 = safeJsonParse(raw2);
-  if (obj2) return obj2;
+  if (obj2 && requireKeys.every(k => obj2[k] !== undefined && obj2[k] !== null)) return obj2;
 
   return null;
 }
 
-// ========= NUEVO: RECOMENDACIÓN DE FRECUENCIA (para guiar al modelo + fallback) =========
+// ========= RECOMENDACIÓN DE FRECUENCIA (fallback) =========
 function recommendedMealsPerDay(profile) {
   const obj = profile.objective;
   const s = inferSignalsFromNotes(profile.analysisNotes);
 
-  // base por objetivo
   let n;
-  if (obj === "A") n = 3;              // déficit: simple y saciante
-  else if (obj === "B") n = 5;         // superávit: repartir volumen/prote
-  else if (obj === "C") n = 4;         // recomposición: intermedio
-  else if (obj === "D") n = 5;         // rendimiento: energía + timing
-  else n = 3;                          // salud: simple
+  if (obj === "A") n = 3;      // déficit: simple y saciante
+  else if (obj === "B") n = 5; // superávit: repartir volumen/prote
+  else if (obj === "C") n = 4; // recomposición: intermedio
+  else if (obj === "D") n = 5; // rendimiento: energía + timing
+  else n = 3;                  // salud: simple
 
-  // ajustes por señales de adherencia
-  if (s.nightHunger) n = Math.max(n, 4);    // sumar colación estratégica tarde
+  if (s.nightHunger) n = Math.max(n, 4);
   if (s.lowEnergy && (obj === "D" || obj === "B")) n = Math.max(n, 5);
-
-  // ajuste por edad (muy suave, sin volverlo rígido)
   if ((profile.age ?? 0) >= 40) n = Math.max(n, 4);
 
-  // límites razonables WhatsApp-friendly
   if (n < 3) n = 3;
   if (n > 6) n = 6;
   return n;
 }
 
-// ========= PROMPT (PLAN 7 DÍAS + COMIDAS + MACROS) =========
-function buildPlanPrompt(profile) {
-  const targetMeals = recommendedMealsPerDay(profile);
-
+// ========= PROMPTS PRO (META + DÍA) =========
+function buildMetaPrompt(profile) {
+  const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";
   return `
-Sos el Asistente Nutricional Oficial de F45.
-Estilo: técnico, claro, motivador. SIN saludos.
+Sos un nutricionista deportivo (no médico). Respuesta 100% en ESPAÑOL. SIN saludos.
 
-Reglas:
-- No reemplazas a un nutricionista clínico.
-- No prescribes dietas médicas ni tratamientos.
-- No haces diagnósticos médicos.
-- Trabajas sobre hábitos, distribución de macronutrientes, timing, hidratación, sueño y adherencia.
-- Recomendas Antropometría cada 4-6 semanas.
-- Si hay condiciones médicas, TCA, embarazo, medicación metabólica o casos complejos: sugerí derivación.
-- NO prometas resultados en tiempos exactos.
-- NO dietas extremas.
-
-Contexto del usuario:
-- Objetivo: ${profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido"}
+Contexto:
+- Objetivo: ${goal}
 - Peso: ${profile.weightKg ?? "N/A"} kg
 - Altura: ${profile.heightCm ?? "N/A"} cm
 - Edad: ${profile.age ?? "N/A"}
 - Sexo: ${profile.sex ?? "N/A"}
-- Última Antropometría: ${profile.lastAnthro ?? "N/A"}
 - % grasa: ${profile.bodyFatPercent ?? "N/A"}
+- Última Antropometría: ${profile.lastAnthro ?? "N/A"}
 - Hábitos reportados: ${profile.analysisNotes ?? "N/A"}
 
 Tarea:
-1) "diagnostico_breve" (2-3 líneas) específico a objetivo + hábitos.
-2) Armá un plan nutricional de 7 días con ejemplos de comidas por día + macros/kcal por comida + totales diarios.
-   - IMPORTANTE: la cantidad de comidas NO es fija. Debe adaptarse como lo haría un nutricionista según objetivo, edad, hábitos y adherencia.
-   - Guía de frecuencia (no rígida): objetivo A suele 3-4 comidas; B suele 4-6; C suele 3-5; D suele 4-6; E suele 3-4.
-   - Para este usuario, sugerencia inicial: ~${targetMeals} comidas/día, pero ajustá si lo justifican sus hábitos (p.ej. hambre nocturna, poca energía, horarios).
-   - Para cada comida: "nombre" + 2 opciones simples ("opciones") + macros/kcal aproximadas.
-   - Nombres válidos típicos: Desayuno, Media mañana, Almuerzo, Merienda, Pre-entreno, Post-entreno, Cena, Snack nocturno.
-   - Mantenerlo realista (no perfecto), basado en hábitos declarados.
-   - Energía suficiente para entrenar: si objetivo es D o B, priorizá timing de carbos y proteína alrededor del entreno.
-3) "entrenamiento_complementario": 2 bullets que apoyen el objetivo (sin inventar rutinas clínicas).
-4) "lista_compras": 12-20 ítems coherentes con el plan.
+1) Definí targets diarios aproximados (kcal, proteína g, carbos g, grasas g) coherentes con el objetivo y el contexto.
+2) Elegí comidas_por_dia (3 a 6) razonadas por objetivo + hábitos (poca proteína / poca agua / alcohol / hambre nocturna / baja energía).
+3) Indicá prioridades_semana (3-6 bullets) para esta semana (subir proteína, agua, recortar alcohol, timing pre/post entreno).
+4) Generá lista_compras 12-20 ítems alineada a esos targets y al objetivo.
+5) Si amerita derivación: "derivacion" (string) o null.
+6) Recomendar Antropometría cada 4-6 semanas (y si no tiene, sugerí una en 7 días como baseline).
 
-DEVOLVÉ SOLO JSON VÁLIDO con este esquema EXACTO:
+DEVOLVÉ SOLO JSON VÁLIDO:
 {
-  "diagnostico_breve": "string",
-  "plan_7_dias": [
-    {
-      "dia": 1,
-      "total_dia": {"kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0},
-      "comidas": [
-        {"nombre": "string", "opciones": ["...","..."], "kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0}
-      ]
-    }
-  ],
-  "entrenamiento_complementario": ["...", "..."],
+  "diagnostico_breve": "string (2-3 líneas)",
+  "targets_diarios": {"kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0},
+  "comidas_por_dia": 0,
+  "prioridades_semana": ["...", "..."],
   "lista_compras": ["..."],
   "sugerir_antropometria": "string o null",
   "derivacion": "string o null"
 }
 
-Condiciones:
-- Los números son estimaciones razonables (no exactitud clínica).
-- Si el usuario reportó poca proteína o poca agua: reflejalo en acciones y selección de comidas.
-- No repitas exactamente el mismo día 7 veces: variá opciones dentro de lo simple.
+Reglas:
+- Nada de textos genéricos tipo “si querés decime horarios”.
+- No inventes patologías.
+- Números aproximados pero coherentes.
+`.trim();
+}
+
+function buildDayPrompt(profile, meta, day) {
+  const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";
+  const t = meta?.targets_diarios || {};
+  const nMeals = meta?.comidas_por_dia || 4;
+
+  return `
+Sos un nutricionista deportivo (no médico). Respuesta 100% en ESPAÑOL. SIN saludos.
+
+Usuario:
+- Objetivo: ${goal}
+- Peso: ${profile.weightKg ?? "N/A"} kg, Altura: ${profile.heightCm ?? "N/A"} cm, Edad: ${profile.age ?? "N/A"}, Sexo: ${profile.sex ?? "N/A"}
+- Hábitos: ${profile.analysisNotes ?? "N/A"}
+
+Targets del día (aprox):
+- kcal: ${t.kcal ?? 0}
+- proteína_g: ${t.proteina_g ?? 0}
+- carbos_g: ${t.carbos_g ?? 0}
+- grasas_g: ${t.grasas_g ?? 0}
+- comidas_por_dia: ${nMeals}
+
+Tarea:
+Generá el DÍA ${day} con EXACTAMENTE ${nMeals} comidas.
+Para cada comida:
+- nombre (ej: Desayuno / Media mañana / Almuerzo / Merienda / Pre-entreno / Post-entreno / Cena / Snack nocturno)
+- "items": 2 a 5 items con cantidades claras (gramos, unidades, cucharadas)
+- macros por comida (kcal, proteína_g, carbos_g, grasas_g)
+Al final: total_dia con suma aproximada.
+
+DEVOLVÉ SOLO JSON VÁLIDO:
+{
+  "dia": ${day},
+  "total_dia": {"kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0},
+  "comidas": [
+    {
+      "nombre": "string",
+      "items": ["item + cantidad", "item + cantidad"],
+      "kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0
+    }
+  ]
+}
+
+Reglas:
+- Si reporta poca proteína: cada comida debe incluir una fuente proteica clara.
+- Si reporta poca agua: incluir 1-2 recordatorios breves dentro de items (ej “Agua 500ml”).
+- Si alcohol 3/semana: sugerí 1 alternativa sin alcohol dentro de items en una comida.
+- Variá fuentes (pollo/pescado/huevos/legumbres/lácteos) y carbos (arroz/papa/avena/fruta/pan).
+- No repitas el mismo día exacto.
 `.trim();
 }
 
 // ========= FORMATTERS =========
 function fmtMeal(meal) {
   const name = cleanStr(meal?.nombre, 40) || "Comida";
-  const opts = Array.isArray(meal?.opciones) ? meal.opciones.map(o => cleanStr(o, 90)).filter(Boolean) : [];
+  const items = Array.isArray(meal?.items) ? meal.items.map(i => cleanStr(i, 80)).filter(Boolean) : [];
   const kcal = Number(meal?.kcal ?? 0) || 0;
   const p = Number(meal?.proteina_g ?? 0) || 0;
   const c = Number(meal?.carbos_g ?? 0) || 0;
   const f = Number(meal?.grasas_g ?? 0) || 0;
 
-  const optLine = opts.length ? `Opciones: ${opts.slice(0, 2).join(" / ")}` : "Opciones: (ejemplos simples)";
-  return `${name} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g\n${optLine}`;
+  const itemsLine = items.length ? `Items: ${items.slice(0, 5).join(" / ")}` : "Items: (sin detalle)";
+  return `${name} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g\n${itemsLine}`;
 }
 
-// NUEVO: corta un mensaje largo en 2 partes "inteligente" (por bloques de comida)
 function splitDayMessageByMeals(header, mealBlocks, maxLen = 1450) {
   const full = `${header}\n\n${mealBlocks.join("\n\n")}`;
   if (full.length <= maxLen) return [full];
 
-  // intentamos partir por la mitad en límite seguro
   const parts = [];
   let cur = header;
   for (const block of mealBlocks) {
@@ -409,7 +432,6 @@ function splitDayMessageByMeals(header, mealBlocks, maxLen = 1450) {
   }
   if (cur && cur.trim()) parts.push(cur);
 
-  // si por alguna razón quedó más de 2, consolidamos a 2 (WhatsApp-friendly)
   if (parts.length <= 2) return parts;
 
   const first = parts.slice(0, Math.ceil(parts.length / 2)).join("\n\n");
@@ -426,7 +448,7 @@ function fmtDay(dayObj) {
   const tf = Number(total?.grasas_g ?? 0) || 0;
 
   const comidas = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
-  const blocks = comidas.slice(0, 8).map(fmtMeal); // límite duro: 8 comidas máx por día
+  const blocks = comidas.slice(0, 8).map(fmtMeal);
 
   const header =
     `Plan nutricional — Día ${dia}\n` +
@@ -437,20 +459,20 @@ function fmtDay(dayObj) {
 
 // ========= ENVÍO DEL PLAN (CORTO, ORDENADO) =========
 async function sendPlanDetailed(api, waId, planObj, profile) {
-  // 1) Diagnóstico
+  // 1) Diagnóstico ya se manda antes (META). Si igual viene, lo mostramos si falta.
   let diag = cleanStr(planObj?.diagnostico_breve, 520);
   if (!diag || diag.length < 50) diag = buildDeterministicDiagnosis(profile);
 
-  await sendText(api, waId, `Diagnóstico breve:\n${diag}\n\n(Nota: macros/calorías son aproximados.)`);
+  // si querés mantener el envío acá también, lo dejamos suave (no duplica si ya lo mandaste)
+  // (no enviamos diagnóstico acá para evitar duplicación en el handler)
 
-  // 2) Plan 7 días (1 mensaje por día; si excede, 2 mensajes para ese día)
+  // 2) Plan 7 días (1 mensaje por día; si excede, 2 mensajes)
   const plan = Array.isArray(planObj?.plan_7_dias) ? planObj.plan_7_dias : [];
   if (!plan.length) {
     await sendText(api, waId,
       "Plan nutricional (7 días):\n" +
-      "- La cantidad de comidas se ajusta a tu objetivo y adherencia.\n" +
-      "- En cada comida: 1 proteína + 1 carbohidrato (según objetivo) + 1 vegetal.\n" +
-      "- Si querés, decime horarios típicos y preferencias y lo detallamos."
+      "- No pude generar el detalle completo en este intento.\n" +
+      "- Reintentá y debería devolverte comidas con cantidades + macros por día."
     );
   } else {
     const byDay = new Map();
@@ -466,7 +488,6 @@ async function sendPlanDetailed(api, waId, planObj, profile) {
       const { header, blocks } = fmtDay(dayObj);
       const msgs = splitDayMessageByMeals(header, blocks, 1450);
 
-      // si parte en 2, etiquetamos
       if (msgs.length === 1) {
         await sendText(api, waId, cleanStr(msgs[0], 1450));
       } else {
@@ -649,24 +670,25 @@ export async function handleNutritionMessage(api, waId, text) {
     await sendText(api, waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
     await sendText(api, waId, "Acá va tu plan inicial (7 días). Te lo mando por partes para que se vea completo:");
 
-    const prompt = buildPlanPrompt(state.nutritionProfile);
+    // 1) META
+    const metaPrompt = buildMetaPrompt(state.nutritionProfile);
 
-    let planObj = null;
+    let meta = null;
     try {
-      planObj = await getPlanJson(prompt);
+      meta = await getPlanJson(metaPrompt, { requireKeys: ["targets_diarios", "comidas_por_dia", "lista_compras"] });
     } catch (e) {
-      if (LOG_LEVEL === "debug") console.error("❌ Plan error:", e?.message || e);
+      if (LOG_LEVEL === "debug") console.error("❌ Meta error:", e?.message || e);
     }
 
-    // Fallback si el modelo falla
-    if (!planObj) {
-      planObj = {
+    if (!meta) {
+      meta = {
         diagnostico_breve: buildDeterministicDiagnosis(state.nutritionProfile),
-        plan_7_dias: [],
-        entrenamiento_complementario: [],
+        targets_diarios: { kcal: 2200, proteina_g: 150, carbos_g: 230, grasas_g: 70 },
+        comidas_por_dia: recommendedMealsPerDay(state.nutritionProfile),
+        prioridades_semana: ["Subir proteína en cada comida", "Aumentar agua diaria", "Reducir alcohol esta semana"],
         lista_compras: [
-          "pollo o carne magra", "huevos", "atún", "yogur griego",
-          "arroz o papa", "avena", "fruta (banana/manzana)", "verduras (hoja/tomate/zanahoria)",
+          "pollo", "huevos", "atún", "carne magra", "yogur griego",
+          "arroz", "papa", "avena", "frutas", "verduras variadas",
           "legumbres", "aceite de oliva", "frutos secos", "queso fresco"
         ],
         sugerir_antropometria: state.nutritionProfile.flags.suggestAnthroIn7Days
@@ -675,6 +697,43 @@ export async function handleNutritionMessage(api, waId, text) {
         derivacion: null
       };
     }
+
+    const diag = cleanStr(meta.diagnostico_breve, 520) || buildDeterministicDiagnosis(state.nutritionProfile);
+    const pri = cleanList(meta.prioridades_semana, 6, 140);
+    const targets = meta.targets_diarios || {};
+    const mealsPerDay = Number(meta.comidas_por_dia ?? 0) || recommendedMealsPerDay(state.nutritionProfile);
+
+    await sendText(api, waId,
+      `Diagnóstico breve:\n${diag}\n\n` +
+      `Targets diarios (aprox): ${targets.kcal} kcal | P ${targets.proteina_g}g C ${targets.carbos_g}g G ${targets.grasas_g}g\n` +
+      `Comidas por día sugeridas: ${mealsPerDay}\n` +
+      (pri.length ? `\nPrioridades (semana):\n- ${pri.join("\n- ")}` : "") +
+      `\n\n(Nota: macros/calorías son aproximados.)`
+    );
+
+    // 2) 7 DÍAS (1 llamada por día)
+    const plan_7_dias = [];
+    for (let d = 1; d <= 7; d++) {
+      const dayPrompt = buildDayPrompt(state.nutritionProfile, { ...meta, comidas_por_dia: mealsPerDay }, d);
+      let dayObj = null;
+
+      try {
+        dayObj = await getPlanJson(dayPrompt, { requireKeys: ["dia", "comidas", "total_dia"] });
+      } catch (e) {
+        if (LOG_LEVEL === "debug") console.error(`❌ Day ${d} error:`, e?.message || e);
+      }
+
+      if (dayObj) plan_7_dias.push(dayObj);
+    }
+
+    const planObj = {
+      diagnostico_breve: diag,
+      plan_7_dias,
+      entrenamiento_complementario: [],
+      lista_compras: meta.lista_compras || [],
+      sugerir_antropometria: meta.sugerir_antropometria ?? null,
+      derivacion: meta.derivacion ?? null
+    };
 
     await sendPlanDetailed(api, waId, planObj, state.nutritionProfile);
     return;
