@@ -19,15 +19,15 @@ import {
   initImageStorage,
 } from "./imageService.js";
 
-// ✅ NUEVAS RUTAS (porque index.js está en el root y nutrition está en /src/nutrition)
+// ✅ RUTAS CORRECTAS (porque index.js ya está dentro de /src)
 import {
   isMenuCommand,
   formatMenuText,
   shouldAutoStartNutrition,
   handleNutritionMessage,
-} from "./src/nutrition/nutritionFlow.js";
+} from "./nutrition/nutritionFlow.js";
 
-import { getState, resetToMenu } from "./src/nutrition/state.js";
+import { getState, resetToMenu } from "./nutrition/state.js";
 
 // ======================
 // ENV
@@ -119,13 +119,11 @@ app.post("/webhook", async (req, res) => {
 
     // MENU: decidir rama
     if (state.flow === "menu") {
-      // auto-start nutrición
       if (shouldAutoStartNutrition(text)) {
         await handleNutritionMessage(api, waId, text, ctx);
         return;
       }
 
-      // si no detecta gimnasio, mantener menú
       if (!isGymIntent(text)) {
         await sendLongText(api, waId, formatMenuText(), 1400);
         return;
