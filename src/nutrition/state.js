@@ -1,3 +1,4 @@
+// src/nutrition/state.js
 const userState = new Map();
 
 export function getState(waId) {
@@ -11,6 +12,10 @@ export function getState(waId) {
         heightCm: null,
         age: null,
         sex: null,
+
+        // ✅ NUEVO
+        activityPerWeek: null, // number (0..14) o null
+
         lastAnthro: null,
         bodyFatPercent: null,
         analysisNotes: null,
@@ -31,6 +36,10 @@ export function resetToMenu(waId) {
       heightCm: null,
       age: null,
       sex: null,
+
+      // ✅ NUEVO
+      activityPerWeek: null,
+
       lastAnthro: null,
       bodyFatPercent: null,
       analysisNotes: null,
