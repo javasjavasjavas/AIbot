@@ -1,3 +1,9 @@
+// index.js (actualizado para módulos de nutrición en /src/nutrition)
+// Cambios:
+// - Importa handleNutritionMessage/isMenuCommand/... desde ./nutrition/nutritionFlow.js
+// - Importa getState/resetToMenu desde ./nutrition/state.js
+// - (Opcional) Importa shouldAutoStartNutrition desde ./nutrition/nutritionFlow.js (se mantiene ahí)
+
 import express from "express";
 import path from "node:path";
 
@@ -19,14 +25,15 @@ import {
   initImageStorage,
 } from "./imageService.js";
 
+// ✅ NUEVAS RUTAS (modularizado)
 import {
-  getState,
-  resetToMenu,
   isMenuCommand,
   formatMenuText,
   shouldAutoStartNutrition,
   handleNutritionMessage,
-} from "./nutritionFlow.js";
+} from "./nutrition/nutritionFlow.js";
+
+import { getState, resetToMenu } from "./nutrition/state.js";
 
 // ======================
 // ENV
@@ -105,6 +112,7 @@ app.post("/webhook", async (req, res) => {
     logInfo(`📩 ${waId}: ${text}`);
 
     const api = { PHONE_NUMBER_ID, WHATSAPP_TOKEN };
+    const ctx = { PUBLIC_BASE_URL, LOG_LEVEL }; // se lo pasamos al handler por si lo usa
 
     // MENU COMMAND
     if (isMenuCommand(text)) {
@@ -117,11 +125,13 @@ app.post("/webhook", async (req, res) => {
 
     // MENU: decidir rama
     if (state.flow === "menu") {
+      // auto-start nutrición
       if (shouldAutoStartNutrition(text)) {
-        await handleNutritionMessage(api, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
+        await handleNutritionMessage(api, waId, text, ctx);
         return;
       }
 
+      // si no detecta gimnasio, mantener menú
       if (!isGymIntent(text)) {
         await sendLongText(api, waId, formatMenuText(), 1400);
         return;
@@ -132,7 +142,7 @@ app.post("/webhook", async (req, res) => {
 
     // NUTRITION FLOW
     if (state.flow === "nutrition") {
-      await handleNutritionMessage(api, waId, text, { PUBLIC_BASE_URL, LOG_LEVEL });
+      await handleNutritionMessage(api, waId, text, ctx);
       return;
     }
 
