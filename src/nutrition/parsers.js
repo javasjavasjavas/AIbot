@@ -1,3 +1,5 @@
+// src/nutrition/parsers.js
+
 export function normalizeText(s) {
   return (s || "")
     .toLowerCase()
@@ -8,9 +10,9 @@ export function normalizeText(s) {
 
 export function parseObjective(text) {
   const t = normalizeText(text);
-  if (["a","b","c","d","e"].includes(t)) return t.toUpperCase();
+  if (["a", "b", "c", "d", "e"].includes(t)) return t.toUpperCase();
   if (t.includes("grasa") || t.includes("bajar") || t.includes("perder peso") || t.includes("definir")) return "A";
-  if (t.includes("masa") || t.includes("musculo") || t.includes("músculo") || t.includes("volumen")) return "B";
+  if (t.includes("masa") || t.includes("musculo") || t.includes("músculo") || t.includes("volumen") || t.includes("ganar")) return "B";
   if (t.includes("recompos")) return "C";
   if (t.includes("rendimiento") || t.includes("performance") || t.includes("energia") || t.includes("energía")) return "D";
   if (t.includes("salud") || t.includes("bienestar") || t.includes("habitos") || t.includes("hábitos")) return "E";
@@ -50,9 +52,34 @@ export function parseSex(text) {
   const t = normalizeText(text);
   if (t.includes("hombre") || t.includes("masculino") || t === "m") return "masculino";
   if (t.includes("mujer") || t.includes("femenino") || t === "f") return "femenino";
-  if (t.includes("no bin") || t.includes("nb")) return "no_binario";
-  if (t.includes("prefiero") || t.includes("no decir")) return "no_especifica";
+  if (t.includes("no bin") || t.includes("nb") || t.includes("no-bin")) return "no_binario";
+  if (t.includes("prefiero") || t.includes("no decir") || t.includes("no especific")) return "no_especifica";
   return null;
+}
+
+// ✅ NUEVO: actividad física (veces/semana)
+export function parseActivityPerWeek(text) {
+  const t = normalizeText(text);
+
+  // Respuestas tipo "no"
+  if (
+    t === "no" ||
+    t === "n" ||
+    t.includes("no hago") ||
+    t.includes("no entreno") ||
+    t.includes("nunca") ||
+    t.includes("cero") ||
+    t.includes("0")
+  ) return 0;
+
+  // Buscar un número (0..14)
+  const m = t.match(/(\d{1,2})/);
+  if (!m) return null;
+
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 0 || n > 14) return null;
+
+  return n;
 }
 
 export function parseBodyFatPercent(text) {
