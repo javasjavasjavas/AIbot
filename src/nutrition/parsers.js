@@ -61,7 +61,7 @@ export function parseSex(text) {
 export function parseActivityPerWeek(text) {
   const t = normalizeText(text);
 
-  // Respuestas tipo "no"
+  // respuestas "no"
   if (
     t === "no" ||
     t === "n" ||
@@ -72,7 +72,7 @@ export function parseActivityPerWeek(text) {
     t.includes("0")
   ) return 0;
 
-  // Buscar un número (0..14)
+  // número 0..14
   const m = t.match(/(\d{1,2})/);
   if (!m) return null;
 
