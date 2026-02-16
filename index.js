@@ -1,9 +1,3 @@
-// index.js (actualizado para módulos de nutrición en /src/nutrition)
-// Cambios:
-// - Importa handleNutritionMessage/isMenuCommand/... desde ./nutrition/nutritionFlow.js
-// - Importa getState/resetToMenu desde ./nutrition/state.js
-// - (Opcional) Importa shouldAutoStartNutrition desde ./nutrition/nutritionFlow.js (se mantiene ahí)
-
 import express from "express";
 import path from "node:path";
 
@@ -25,15 +19,15 @@ import {
   initImageStorage,
 } from "./imageService.js";
 
-// ✅ NUEVAS RUTAS (modularizado)
+// ✅ NUEVAS RUTAS (porque index.js está en el root y nutrition está en /src/nutrition)
 import {
   isMenuCommand,
   formatMenuText,
   shouldAutoStartNutrition,
   handleNutritionMessage,
-} from "./nutrition/nutritionFlow.js";
+} from "./src/nutrition/nutritionFlow.js";
 
-import { getState, resetToMenu } from "./nutrition/state.js";
+import { getState, resetToMenu } from "./src/nutrition/state.js";
 
 // ======================
 // ENV
@@ -112,7 +106,7 @@ app.post("/webhook", async (req, res) => {
     logInfo(`📩 ${waId}: ${text}`);
 
     const api = { PHONE_NUMBER_ID, WHATSAPP_TOKEN };
-    const ctx = { PUBLIC_BASE_URL, LOG_LEVEL }; // se lo pasamos al handler por si lo usa
+    const ctx = { PUBLIC_BASE_URL, LOG_LEVEL };
 
     // MENU COMMAND
     if (isMenuCommand(text)) {
