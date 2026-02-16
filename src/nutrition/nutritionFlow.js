@@ -1,4 +1,4 @@
-import { sendText, sendLongText } from "../whatsapp.js";
+import { sendText } from "../whatsapp.js";
 
 import { getState } from "./state.js";
 import {
@@ -10,14 +10,14 @@ import {
   parseSex,
   parseBodyFatPercent,
   saysNoAnthro,
-  objectiveLabel
 } from "./parsers.js";
 
 import { cleanStr, cleanList } from "./sanitize.js";
 import { buildDeterministicDiagnosis, recommendedMealsPerDay } from "./signals.js";
-import { getPlanJson } from "./geminiClient.js";
+import { getPlanJson, callGemini } from "./geminiClient.js";
 import { buildMetaPrompt, buildDayPrompt } from "./prompts.js";
 import { validateDayPlan } from "./validation.js";
+import { sendPlanDetailed } from "./sender.js";
 
 // ======================
 // MENU HELPERS (export)
@@ -61,113 +61,50 @@ export function shouldAutoStartNutrition(text) {
 }
 
 // ======================
-// FALLBACK DAY GENERATOR (para no perder días)
+// Concurrency helper
 // ======================
-function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+async function asyncPool(limit, items, iteratorFn) {
+  const ret = [];
+  const executing = [];
+  for (const item of items) {
+    const p = Promise.resolve().then(() => iteratorFn(item));
+    ret.push(p);
 
-function splitWeightsForMeals(n) {
-  // pesos de kcal por comida (suma ~1)
-  if (n === 3) return [0.30, 0.40, 0.30];
-  if (n === 4) return [0.25, 0.30, 0.15, 0.30];
-  if (n === 5) return [0.20, 0.12, 0.28, 0.18, 0.22];
-  if (n === 6) return [0.18, 0.12, 0.22, 0.12, 0.18, 0.18];
-  return Array.from({ length: n }, () => 1 / n);
-}
-
-function namesForMeals(n) {
-  if (n === 3) return ["Desayuno", "Almuerzo", "Cena"];
-  if (n === 4) return ["Desayuno", "Almuerzo", "Merienda / Pre-entreno", "Cena"];
-  if (n === 5) return ["Desayuno", "Media mañana", "Almuerzo", "Merienda / Pre-entreno", "Cena"];
-  if (n === 6) return ["Desayuno", "Media mañana", "Almuerzo", "Merienda", "Pre/Post-entreno", "Cena"];
-  return Array.from({ length: n }, (_, i) => `Comida ${i + 1}`);
-}
-
-function round10(x) { return Math.round(x / 10) * 10; }
-
-function makeFallbackDay(profile, meta, day) {
-  const targets = meta?.targets_diarios || { kcal: 2200, proteina_g: 150, carbos_g: 230, grasas_g: 70 };
-  const n = clamp(Number(meta?.comidas_por_dia ?? 4) || 4, 3, 6);
-
-  const weights = splitWeightsForMeals(n);
-  const mealNames = namesForMeals(n);
-
-  // Rotación simple para variedad
-  const proteins = ["pechuga de pollo", "huevos", "atún", "carne magra", "merluza", "yogur griego", "lentejas"];
-  const carbs = ["arroz", "papa/batata", "avena", "pan integral", "quinoa", "fideos", "legumbres"];
-  const vegs = ["brócoli", "ensalada mixta", "zanahoria", "espinaca", "tomate", "zucchini", "morrones"];
-  const fats = ["aceite de oliva", "palta", "nueces/almendras", "maní", "semillas"];
-
-  const meals = [];
-  for (let i = 0; i < n; i++) {
-    const w = weights[i];
-
-    const kcal = Math.round(targets.kcal * w);
-    const p = Math.max(15, Math.round(targets.proteina_g * (0.9 * w + 0.1 / n)));
-    const c = Math.max(15, Math.round(targets.carbos_g * (0.95 * w + 0.05 / n)));
-    const f = Math.max(6, Math.round(targets.grasas_g * (0.95 * w + 0.05 / n)));
-
-    const prot = proteins[(day + i) % proteins.length];
-    const carb = carbs[(day + i * 2) % carbs.length];
-    const veg = vegs[(day + i * 3) % vegs.length];
-    const fat = fats[(day + i * 4) % fats.length];
-
-    // cantidades simples (aprox) para que no sea “genérico sin gramos”
-    const protQty = prot === "huevos" ? `${clamp(Math.round(p / 10), 2, 4)} unidades` : `${round10(clamp(p * 4, 120, 220))} g`;
-    const carbQty = `${round10(clamp(c * 3, 80, 220))} g (cocido)`;
-    const vegQty = `${round10(clamp(150 + i * 20, 150, 250))} g`;
-    const fatQty = fat.includes("aceite") ? "1 cda (10 ml)" : "20 g";
-
-    const items = [
-      `${prot}: ${protQty}`,
-      `${carb}: ${carbQty}`,
-      `${veg}: ${vegQty}`,
-      `${fat}: ${fatQty}`
-    ];
-
-    // hábitos: agua / alcohol
-    const notes = normalizeText(profile?.analysisNotes || "");
-    if (notes.includes("poca agua") || notes.includes("tomo poca")) {
-      if (i === 0 || i === Math.floor(n / 2)) items.push("Agua: 500 ml");
+    if (limit <= items.length) {
+      const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+      executing.push(e);
+      if (executing.length >= limit) {
+        await Promise.race(executing);
+      }
     }
-    if (notes.includes("alcohol") && i === n - 1) {
-      items.push("Alternativa sin alcohol: agua con gas + limón");
-    }
-
-    meals.push({
-      nombre: mealNames[i],
-      items,
-      kcal,
-      proteina_g: p,
-      carbos_g: c,
-      grasas_g: f
-    });
   }
+  return Promise.allSettled(ret);
+}
 
-  // totales aproximados desde comidas
-  const total = meals.reduce(
-    (acc, m) => ({
-      kcal: acc.kcal + (Number(m.kcal) || 0),
-      proteina_g: acc.proteina_g + (Number(m.proteina_g) || 0),
-      carbos_g: acc.carbos_g + (Number(m.carbos_g) || 0),
-      grasas_g: acc.grasas_g + (Number(m.grasas_g) || 0)
-    }),
-    { kcal: 0, proteina_g: 0, carbos_g: 0, grasas_g: 0 }
-  );
+// Repair: pedirle a Gemini que repare un día inválido (sin hardcodeo)
+async function repairDayJson(dayRawJson, expectedMeals) {
+  const repairPrompt = `
+Devolvé SOLO JSON VÁLIDO. Repará y completá este plan diario.
+Condiciones obligatorias:
+- EXACTAMENTE ${expectedMeals} comidas
+- Ninguna comida con macros 0
+- total_dia coherente (aprox suma de comidas)
 
-  return {
-    dia: day,
-    total_dia: {
-      kcal: Math.round(total.kcal),
-      proteina_g: Math.round(total.proteina_g),
-      carbos_g: Math.round(total.carbos_g),
-      grasas_g: Math.round(total.grasas_g)
-    },
-    comidas: meals
-  };
+JSON a reparar:
+${dayRawJson}
+`.trim();
+
+  const fixed = await callGemini(repairPrompt, {
+    responseMimeType: "application/json",
+    temperature: 0.0,
+    maxOutputTokens: 2400
+  });
+
+  try { return JSON.parse(fixed); } catch { return null; }
 }
 
 // ======================
-// MAIN HANDLER (export)
+// MAIN HANDLER
 // ======================
 export async function handleNutritionMessage(api, waId, text, ctx = {}) {
   const state = getState(waId);
@@ -283,14 +220,14 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
     await sendText(api, waId, "Genial. Con todo esto ya puedo armarte un plan de acción inicial para esta semana ✅");
 
-    // ✅ Reemplazo del texto (sin prometer tiempos / espera)
+    // ✅ Texto solicitado (sin prometer tiempo exacto; se envía ya)
     await sendText(
       api,
       waId,
-      "Estamos armando un plan inicial (7 días) a medida de tus necesidades. A continuación te lo envío por partes para que se vea completo:"
+      "Estamos armando un plan inicial (7 días) a medida de tus necesidades. Te lo enviamos ni bien lo tengamos listo."
     );
 
-    // 1) META
+    // 1) META (1 llamada)
     const metaPrompt = buildMetaPrompt(state.nutritionProfile);
 
     let meta = null;
@@ -317,7 +254,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
     const diag = cleanStr(meta.diagnostico_breve, 520) || buildDeterministicDiagnosis(state.nutritionProfile);
     const pri = cleanList(meta.prioridades_semana, 6, 140);
     const targets = meta.targets_diarios || {};
-    const mealsPerDay = clamp(Number(meta.comidas_por_dia ?? 0) || recommendedMealsPerDay(state.nutritionProfile), 3, 6);
+    const mealsPerDay = Math.max(3, Math.min(6, Number(meta.comidas_por_dia || recommendedMealsPerDay(state.nutritionProfile))));
 
     await sendText(api, waId,
       `🧠 *Diagnóstico breve:*\n${diag}\n\n` +
@@ -327,48 +264,92 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
       `\n\n_(Nota: macros/calorías son aproximados.)_`
     );
 
-    // 2) 7 DÍAS con reintentos + garantía de 1..7
-    const planByDay = new Map();
+    // 2) DÍAS 1..7 (IA 100%) en paralelo con límite (más rápido)
+    const days = [1,2,3,4,5,6,7];
+    const concurrency = 3; // subilo a 4 si tu cuota lo permite
 
-    for (let d = 1; d <= 7; d++) {
+    const results = await asyncPool(concurrency, days, async (d) => {
       const expectedMeals = mealsPerDay;
-      let dayObj = null;
 
-      // 🔥 subimos a 5 intentos (antes 3) para reducir días faltantes
-      for (let attempt = 1; attempt <= 5; attempt++) {
+      // Intentos + repair si falla (sin hardcodeo)
+      for (let attempt = 1; attempt <= 3; attempt++) {
         const dayPrompt = buildDayPrompt(state.nutritionProfile, { ...meta, comidas_por_dia: expectedMeals }, d);
 
-        try {
-          dayObj = await getPlanJson(dayPrompt, { requireKeys: ["dia", "comidas", "total_dia"] });
-        } catch (e) {
-          if (LOG_LEVEL === "debug") console.error(`❌ Day ${d} attempt ${attempt} error:`, e?.message || e);
-          dayObj = null;
-        }
+        // pedimos JSON (getPlanJson ya fuerza mime application/json)
+        const dayObj = await getPlanJson(dayPrompt, { requireKeys: ["dia", "comidas", "total_dia"] });
 
         const v = validateDayPlan(dayObj, expectedMeals);
-        if (v.ok) break;
+        if (v.ok) return dayObj;
 
-        if (LOG_LEVEL === "debug") console.error(`⚠️ Day ${d} inválido (attempt ${attempt}): ${v.reason}`);
-        dayObj = null;
+        // repair con el JSON “crudo” (re-pedido) si vino mal
+        // (reconstruimos el raw con stringify para que Gemini lo repare)
+        const repaired = await repairDayJson(JSON.stringify(dayObj ?? {}), expectedMeals);
+        const vr = validateDayPlan(repaired, expectedMeals);
+        if (vr.ok) return repaired;
       }
 
-      // ✅ Si falló igual, no lo descartamos: generamos un fallback local
-      if (!dayObj) {
-        dayObj = makeFallbackDay(state.nutritionProfile, { ...meta, comidas_por_dia: expectedMeals }, d);
-        if (LOG_LEVEL === "debug") console.error(`ℹ️ Day ${d}: usando fallback local`);
-      }
+      // Último recurso: pedirle explícitamente “generá de nuevo”
+      const regenerate = await getPlanJson(
+        buildDayPrompt(state.nutritionProfile, { ...meta, comidas_por_dia: mealsPerDay }, d),
+        { requireKeys: ["dia", "comidas", "total_dia"] }
+      );
+      return regenerate;
+    });
 
-      planByDay.set(d, dayObj);
+    // Convertir a mapa día -> obj (asegurar 1..7)
+    const planByDay = new Map();
+    results.forEach((r, idx) => {
+      const day = days[idx];
+      if (r.status === "fulfilled" && r.value) planByDay.set(day, r.value);
+    });
+
+    // Si faltó alguno, pedir “missing days” en una sola llamada (rápido)
+    const missing = days.filter(d => !planByDay.has(d));
+    if (missing.length) {
+      const missingPrompt = `
+Sos un nutricionista deportivo profesional. Respuesta 100% en ESPAÑOL. SIN saludos.
+Necesito SOLO los días faltantes del plan (JSON).
+Días faltantes: ${missing.join(", ")}.
+Comidas por día: ${mealsPerDay}.
+Targets diarios: ${JSON.stringify(targets)}.
+Ficha usuario: ${JSON.stringify(state.nutritionProfile)}.
+
+DEVOLVÉ SOLO JSON:
+{
+  "dias": [ { "dia": 0, "total_dia": {...}, "comidas": [...] } ]
+}
+`.trim();
+
+      try {
+        const missingObj = await getPlanJson(missingPrompt, { requireKeys: ["dias"] });
+        const arr = Array.isArray(missingObj?.dias) ? missingObj.dias : [];
+        for (const dObj of arr) {
+          const d = Number(dObj?.dia ?? 0);
+          if (!planByDay.has(d) && missing.includes(d)) {
+            const v = validateDayPlan(dObj, mealsPerDay);
+            if (v.ok) planByDay.set(d, dObj);
+          }
+        }
+      } catch (e) {
+        if (LOG_LEVEL === "debug") console.error("❌ Missing days error:", e?.message || e);
+      }
     }
 
-    // convertir a array ordenado 1..7
+    // Armar plan ordenado 1..7 (si alguno sigue faltando, NO hardcodeamos comida: lo re-pedimos 1 a 1)
     const plan_7_dias = [];
-    for (let d = 1; d <= 7; d++) {
-      const day = planByDay.get(d);
-      if (day) plan_7_dias.push(day);
+    for (const d of days) {
+      if (planByDay.has(d)) {
+        plan_7_dias.push(planByDay.get(d));
+        continue;
+      }
+      // repedido individual (IA 100%)
+      const dObj = await getPlanJson(
+        buildDayPrompt(state.nutritionProfile, { ...meta, comidas_por_dia: mealsPerDay }, d),
+        { requireKeys: ["dia", "comidas", "total_dia"] }
+      );
+      plan_7_dias.push(dObj);
     }
 
-    // 3) Ensamble final y envío (usa el sender que ya tenés)
     const planObj = {
       diagnostico_breve: diag,
       plan_7_dias,
@@ -378,9 +359,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
       derivacion: meta.derivacion ?? null
     };
 
-    // Import dinámico para evitar ciclos si tu proyecto lo armó así.
-    // Si ya lo tenías estático, podés volver a importarlo arriba.
-    const { sendPlanDetailed } = await import("./sender.js");
+    // 3) Envío WhatsApp-safe (tu sender ya parte por día)
     await sendPlanDetailed(api, waId, planObj, state.nutritionProfile);
     return;
   }
