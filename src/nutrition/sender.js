@@ -1,25 +1,25 @@
+// src/nutrition/sender.js
 import { sendText } from "../whatsapp.js";
 import { cleanStr, cleanList } from "./sanitize.js";
 
 // ======================
-// Limits (WhatsApp-safe)
+// CONFIG WHATSAPP SAFE
 // ======================
-// Importante: WhatsApp suele mostrar "Leer más" ~700-900 chars dependiendo del cliente.
-// Para evitarlo, mantenemos chunks chicos.
-const WA_CHUNK_LIMIT = 850;  // probá 780 si todavía aparece "Leer más"
-const WA_HARD_LIMIT = 1200;  // seguridad
 
-function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+const WA_CHUNK_LIMIT = 800;   // límite visual antes de "Leer más"
+const WA_HARD_LIMIT = 1200;   // límite máximo seguro por mensaje
 
 function num(x) {
   const n = Number(x);
   return Number.isFinite(n) ? n : 0;
 }
 
-function bold(s) { return `*${s}*`; }
+function bold(t) {
+  return `*${t}*`;
+}
 
-function emojiForMeal(name) {
-  const t = (name || "").toLowerCase();
+function emojiForMeal(name = "") {
+  const t = name.toLowerCase();
   if (t.includes("desay")) return "🍳";
   if (t.includes("media")) return "🥛";
   if (t.includes("alm")) return "🍗";
@@ -29,153 +29,203 @@ function emojiForMeal(name) {
   return "🍽️";
 }
 
-function fmtMeal(meal, idx) {
-  const name = cleanStr(meal?.nombre, 50) || `Comida ${idx + 1}`;
+// ======================
+// FORMATEO DE COMIDAS
+// ======================
+
+function fmtMeal(meal, index) {
+  const name = cleanStr(meal?.nombre, 60) || `Comida ${index + 1}`;
   const kcal = num(meal?.kcal);
   const p = num(meal?.proteina_g);
   const c = num(meal?.carbos_g);
   const f = num(meal?.grasas_g);
-  const items = Array.isArray(meal?.items) ? meal.items : (Array.isArray(meal?.opciones) ? meal.opciones : []);
-  const safeItems = cleanList(items, 6, 140);
 
-  const header =
-    `${emojiForMeal(name)} ${bold(name)} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g`;
+  const items = Array.isArray(meal?.items)
+    ? meal.items
+    : Array.isArray(meal?.opciones)
+      ? meal.opciones
+      : [];
 
-  const body = safeItems.length
-    ? safeItems.map(it => `- ${cleanStr(it, 160)}`).join("\n")
-    : "- (sin items)";
+  const safeItems = cleanList(items, 8, 150);
 
-  return `${header}\n${body}`;
+  return (
+    `${emojiForMeal(name)} ${bold(name)} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g\n` +
+    safeItems.map(i => `- ${cleanStr(i, 160)}`).join("\n")
+  );
 }
 
 function fmtDayHeader(dayObj) {
   const dia = num(dayObj?.dia);
   const total = dayObj?.total_dia || {};
-  const tk = num(total?.kcal);
-  const tp = num(total?.proteina_g);
-  const tc = num(total?.carbos_g);
-  const tf = num(total?.grasas_g);
 
   return (
     `📅 ${bold(`Plan nutricional — Día ${dia}`)}\n` +
-    `🎯 ${bold("Total día")}: ${tk} kcal | P ${tp}g C ${tc}g G ${tf}g\n`
+    `🎯 ${bold("Total día")}: ${num(total.kcal)} kcal | ` +
+    `P ${num(total.proteina_g)}g C ${num(total.carbos_g)}g G ${num(total.grasas_g)}g`
   );
 }
 
-// Divide por límites sin cortar líneas a la mitad
-function chunkByLines(text, limit = WA_CHUNK_LIMIT) {
-  const s = cleanStr(text, WA_HARD_LIMIT * 3); // dejamos margen interno
-  const lines = s.split("\n");
-  const chunks = [];
-  let cur = "";
+// ======================
+// CHUNKING (ANTI CORTE)
+// ======================
 
-  for (const line of lines) {
-    const add = cur ? `${cur}\n${line}` : line;
-    if (add.length <= limit) {
-      cur = add;
+function chunkByBlocks(blocks) {
+  const chunks = [];
+  let current = "";
+
+  for (const block of blocks) {
+    const candidate = current ? `${current}\n\n${block}` : block;
+
+    if (candidate.length <= WA_CHUNK_LIMIT) {
+      current = candidate;
       continue;
     }
-    if (cur) chunks.push(cur);
-    // si una línea sola excede limit, la cortamos duro
-    if (line.length > limit) {
-      for (let i = 0; i < line.length; i += limit) {
-        chunks.push(line.slice(i, i + limit));
+
+    if (current) chunks.push(current);
+
+    if (block.length > WA_CHUNK_LIMIT) {
+      // dividir por líneas
+      const lines = block.split("\n");
+      let sub = "";
+      for (const line of lines) {
+        const cand = sub ? `${sub}\n${line}` : line;
+        if (cand.length <= WA_CHUNK_LIMIT) {
+          sub = cand;
+        } else {
+          if (sub) chunks.push(sub);
+          sub = line;
+        }
       }
-      cur = "";
+      if (sub) chunks.push(sub);
+      current = "";
     } else {
-      cur = line;
+      current = block;
     }
   }
-  if (cur) chunks.push(cur);
+
+  if (current) chunks.push(current);
+
   return chunks;
 }
 
-async function sendDayInChunks(api, waId, dayObj) {
+async function sendDay(api, waId, dayObj) {
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
 
-  // Armamos bloques: header + 1–2 comidas por chunk (más legible)
-  const header = fmtDayHeader(dayObj);
-  const mealBlocks = meals.map((m, i) => fmtMeal(m, i));
+  const blocks = [
+    fmtDayHeader(dayObj),
+    ...meals.map((m, i) => fmtMeal(m, i))
+  ];
 
-  // Strategy: header va con la primera comida si entra
-  const blocks = [header, ...mealBlocks];
+  const chunks = chunkByBlocks(blocks);
 
-  // Vamos acumulando por bloques completos
-  let cur = "";
-  const chunks = [];
-
-  for (const b of blocks) {
-    const candidate = cur ? `${cur}\n\n${b}` : b;
-    if (candidate.length <= WA_CHUNK_LIMIT) {
-      cur = candidate;
-      continue;
-    }
-    if (cur) chunks.push(cur);
-    // si un bloque es enorme (items largos), lo partimos por líneas
-    if (b.length > WA_CHUNK_LIMIT) {
-      chunks.push(...chunkByLines(b, WA_CHUNK_LIMIT));
-      cur = "";
-    } else {
-      cur = b;
-    }
-  }
-  if (cur) chunks.push(cur);
-
-  // Enviar en orden
   for (const msg of chunks) {
     await sendText(api, waId, cleanStr(msg, WA_HARD_LIMIT));
   }
 }
 
 // ======================
-// Public: sendPlanDetailed
+// LISTA DE COMPRAS
 // ======================
-export async function sendPlanDetailed(api, waId, planObj, profile) {
-  // 1) Diagnóstico (ya lo mandaste antes en nutritionFlow; acá lo respetamos si querés reutilizar)
-  // Si querés mantenerlo acá también, descomentá:
-  // const diag = cleanStr(planObj?.diagnostico_breve, 650);
-  // if (diag) await sendText(api, waId, `🧠 *Diagnóstico breve:*\n${diag}\n\n_(Nota: macros/calorías son aproximados.)_`);
 
-  // 2) Plan 7 días (en chunks, no 1 mensaje por día)
-  const plan = Array.isArray(planObj?.plan_7_dias) ? planObj.plan_7_dias : [];
+function formatShoppingList(lista) {
+  if (!Array.isArray(lista) || !lista.length) return null;
+
+  // Caso nuevo: objetos con categoria
+  if (typeof lista[0] === "object") {
+    const grouped = {};
+
+    for (const item of lista) {
+      const cat = item.categoria || "otros";
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(item);
+    }
+
+    let out = `🛒 ${bold("Lista de compras semanal")}\n`;
+
+    for (const cat of Object.keys(grouped)) {
+      out += `\n${bold(cat.toUpperCase())}\n`;
+      for (const it of grouped[cat]) {
+        out += `- ${it.item}${it.cantidad_aprox ? ` (${it.cantidad_aprox})` : ""}\n`;
+      }
+    }
+
+    return out.trim();
+  }
+
+  // Caso viejo: array de strings
+  const clean = cleanList(lista, 40, 120);
+  return (
+    `🛒 ${bold("Lista de compras semanal")}\n` +
+    clean.map(i => `- ${i}`).join("\n")
+  );
+}
+
+// ======================
+// MAIN EXPORT
+// ======================
+
+export async function sendPlanDetailed(api, waId, planObj, profile) {
+  // 1️⃣ PLAN 7 DÍAS
+  const plan = Array.isArray(planObj?.plan_7_dias)
+    ? planObj.plan_7_dias
+    : [];
+
   if (!plan.length) {
-    await sendText(
-      api,
-      waId,
-      "No pude generar el plan completo. Decime tus horarios típicos y preferencias y lo rearmamos."
-    );
+    await sendText(api, waId, "No pude generar el plan completo. Intentemos nuevamente.");
     return;
   }
 
-  // Asegurar orden 1..7
   const byDay = new Map();
   for (const d of plan) {
     const n = num(d?.dia);
-    if (n >= 1 && n <= 7 && !byDay.has(n)) byDay.set(n, d);
+    if (n >= 1 && n <= 7 && !byDay.has(n)) {
+      byDay.set(n, d);
+    }
   }
 
   for (let d = 1; d <= 7; d++) {
-    const dayObj = byDay.get(d);
-    if (!dayObj) continue;
-    await sendDayInChunks(api, waId, dayObj);
+    if (byDay.has(d)) {
+      await sendDay(api, waId, byDay.get(d));
+    }
   }
 
-  // 3) Entrenamiento complementario (si llega)
-  const train = cleanList(planObj?.entrenamiento_complementario, 2, 220);
-  if (train.length) {
-    await sendText(api, waId, `🏋️ ${bold("Entrenamiento complementario")}:\n- ${train[0]}\n- ${train[1]}`);
+  // 2️⃣ ENTRENAMIENTO COMPLEMENTARIO
+  if (Array.isArray(planObj?.entrenamiento_complementario) &&
+      planObj.entrenamiento_complementario.length) {
+
+    const train = cleanList(planObj.entrenamiento_complementario, 4, 220);
+
+    await sendText(
+      api,
+      waId,
+      `🏋️ ${bold("Entrenamiento complementario")}:\n` +
+      train.map(t => `- ${t}`).join("\n")
+    );
   }
 
-  // 4) Lista de compras
-  const shopping = cleanList(planObj?.lista_compras, 20, 80);
-  if (shopping.length) {
-    await sendText(api, waId, `🛒 ${bold("Lista de compras (base)")}:\n- ${shopping.join("\n- ")}`);
+  // 3️⃣ LISTA DE COMPRAS
+  const shoppingMsg = formatShoppingList(planObj?.lista_compras);
+  if (shoppingMsg) {
+    const chunks = chunkByBlocks([shoppingMsg]);
+    for (const msg of chunks) {
+      await sendText(api, waId, cleanStr(msg, WA_HARD_LIMIT));
+    }
   }
 
-  // 5) Antropometría / derivación
-  const ant = cleanStr(planObj?.sugerir_antropometria ?? "", 320);
-  const der = cleanStr(planObj?.derivacion ?? "", 320);
+  // 4️⃣ ANTROPOMETRÍA / DERIVACIÓN
+  if (planObj?.sugerir_antropometria) {
+    await sendText(
+      api,
+      waId,
+      `📏 ${bold("Antropometría")}:\n${cleanStr(planObj.sugerir_antropometria, 400)}`
+    );
+  }
 
-  if (ant) await sendText(api, waId, `📏 ${bold("Antropometría")}:\n${ant}`);
-  if (der) await sendText(api, waId, `🩺 ${bold("Derivación sugerida")}:\n${der}`);
+  if (planObj?.derivacion) {
+    await sendText(
+      api,
+      waId,
+      `🩺 ${bold("Derivación sugerida")}:\n${cleanStr(planObj.derivacion, 400)}`
+    );
+  }
 }
