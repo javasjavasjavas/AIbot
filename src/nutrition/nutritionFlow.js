@@ -1,9 +1,4 @@
 // src/nutrition/nutritionFlow.js
-// Flow de Nutrición (onboarding + plan) - WhatsApp-safe, 100% IA (Gemini) para diagnóstico/targets/prioridades y dieta.
-// Mantiene el flow/preguntas originales + agrega actividad física después de "sexo".
-// Envío del plan: chunked en sender.js para evitar cortes.
-// Robustez: retry/repair JSON en geminiClient + try/catch global en pipeline dieta para no cortarse a mitad.
-
 import { sendText } from "../whatsapp.js";
 
 import { getState } from "./state.js";
@@ -23,11 +18,8 @@ import { cleanStr, cleanList } from "./sanitize.js";
 import { getPlanJson } from "./geminiClient.js";
 import { buildMetaPrompt, buildDayPrompt, buildShoppingPrompt } from "./prompts.js";
 import { validateMeta, validateDayPlan } from "./validation.js";
-import { sendPlanDetailed } from "./sender.js";
+import { sendDayDetailed, sendPlanDetailed } from "./sender.js";
 
-// ======================
-// MENU HELPERS (exports)
-// ======================
 export function isMenuCommand(text) {
   const t = normalizeText(text);
   return (
@@ -61,47 +53,17 @@ export function shouldAutoStartNutrition(text) {
   ];
   if (strong.some(p => t.includes(p))) return true;
 
-  const wants =
-    t.includes("quiero") ||
-    t.includes("necesito") ||
-    t.includes("me gustaria") ||
-    t.includes("me gustaría");
-
+  const wants = t.includes("quiero") || t.includes("necesito") || t.includes("me gustaria") || t.includes("me gustaría");
   const goals = ["bajar", "perder", "definir", "marcar", "volumen", "musculo", "músculo", "rendimiento", "salud"];
   return wants && goals.some(g => t.includes(g));
 }
 
-// ======================
-// CONCURRENCY HELPERS
-// ======================
-async function asyncPool(limit, items, iteratorFn) {
-  const ret = [];
-  const executing = [];
-
-  for (const item of items) {
-    const p = Promise.resolve().then(() => iteratorFn(item));
-    ret.push(p);
-
-    if (limit <= items.length) {
-      const e = p.then(() => executing.splice(executing.indexOf(e), 1));
-      executing.push(e);
-      if (executing.length >= limit) await Promise.race(executing);
-    }
-  }
-
-  return Promise.allSettled(ret);
-}
-
-// ======================
-// STRICT GENERATION (NO HARDCODE)
-// ======================
 async function getMetaStrict(profile) {
   for (let i = 1; i <= 3; i++) {
     const meta = await getPlanJson(buildMetaPrompt(profile), {
       requireKeys: ["diagnostico_breve", "targets_diarios", "comidas_por_dia", "prioridades_semana"],
       attempts: 2
     });
-
     const v = validateMeta(meta);
     if (v.ok) return meta;
   }
@@ -117,7 +79,6 @@ async function getMetaStrict(profile) {
 
   const v2 = validateMeta(meta2);
   if (!v2.ok) throw new Error(`Meta inválida: ${v2.reason}`);
-
   return meta2;
 }
 
@@ -143,9 +104,6 @@ async function getDayStrict(profile, meta, day, mealsPerDay) {
   return last;
 }
 
-// ======================
-// MAIN HANDLER (export)
-// ======================
 export async function handleNutritionMessage(api, waId, text, ctx = {}) {
   const state = getState(waId);
   const LOG_LEVEL = ctx.LOG_LEVEL || process.env.LOG_LEVEL || "info";
@@ -153,7 +111,6 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
   function logDebug(...args) { if (LOG_LEVEL === "debug") console.log(...args); }
   function logError(...args) { console.error(...args); }
 
-  // Arranque desde menú
   if (state.flow === "menu") {
     const t = normalizeText(text);
     if (t.includes("nutri") || shouldAutoStartNutrition(text)) {
@@ -174,7 +131,6 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
     return;
   }
 
-  // Garantizar flujo nutrition
   if (state.flow !== "nutrition") {
     state.flow = "nutrition";
     state.nutritionStep = state.nutritionStep || "objective";
@@ -182,18 +138,10 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   const step = state.nutritionStep;
 
-  // ======================
-  // STEPS
-  // ======================
-
   if (step === "objective") {
     const obj = parseObjective(text);
     if (!obj) {
-      await sendText(
-        api,
-        waId,
-        "Decime tu objetivo: A) bajar grasa B) ganar músculo C) recomposición D) rendimiento E) salud general"
-      );
+      await sendText(api, waId, "Decime tu objetivo: A) bajar grasa B) ganar músculo C) recomposición D) rendimiento E) salud general");
       return;
     }
     state.nutritionProfile.objective = obj;
@@ -204,10 +152,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_weight") {
     const w = parseWeightKg(text);
-    if (!w) {
-      await sendText(api, waId, "Peso inválido. Pasame un número en kg (ej: 72 o 72.5).");
-      return;
-    }
+    if (!w) { await sendText(api, waId, "Peso inválido. Pasame un número en kg (ej: 72 o 72.5)."); return; }
     state.nutritionProfile.weightKg = w;
     state.nutritionStep = "base_height";
     await sendText(api, waId, "¿Altura? (175 o 1.75)");
@@ -216,10 +161,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_height") {
     const h = parseHeightCm(text);
-    if (!h) {
-      await sendText(api, waId, "Altura inválida. Pasame 175 o 1.75.");
-      return;
-    }
+    if (!h) { await sendText(api, waId, "Altura inválida. Pasame 175 o 1.75."); return; }
     state.nutritionProfile.heightCm = h;
     state.nutritionStep = "base_age";
     await sendText(api, waId, "¿Edad? (solo número)");
@@ -228,10 +170,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_age") {
     const age = parseAge(text);
-    if (!age) {
-      await sendText(api, waId, "Edad inválida. Pasame un número (ej: 29).");
-      return;
-    }
+    if (!age) { await sendText(api, waId, "Edad inválida. Pasame un número (ej: 29)."); return; }
     state.nutritionProfile.age = age;
     state.nutritionStep = "base_sex";
     await sendText(api, waId, "¿Sexo? (masculino / femenino / no binario / prefiero no decir)");
@@ -240,13 +179,8 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_sex") {
     const sx = parseSex(text);
-    if (!sx) {
-      await sendText(api, waId, "Decime: masculino / femenino / no binario / prefiero no decir.");
-      return;
-    }
+    if (!sx) { await sendText(api, waId, "Decime: masculino / femenino / no binario / prefiero no decir."); return; }
     state.nutritionProfile.sex = sx;
-
-    // ✅ NUEVO: actividad física
     state.nutritionStep = "base_activity";
     await sendText(api, waId, "¿Hacés actividad física? ¿Cuántas veces por semana? (ej: 0 / 3 / 5)");
     return;
@@ -254,12 +188,8 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_activity") {
     const n = parseActivityPerWeek(text);
-    if (n === null) {
-      await sendText(api, waId, "Decime un número de veces por semana (0 a 14). Ej: 0 / 3 / 5");
-      return;
-    }
+    if (n === null) { await sendText(api, waId, "Decime un número de veces por semana (0 a 14). Ej: 0 / 3 / 5"); return; }
     state.nutritionProfile.activityPerWeek = n;
-
     state.nutritionStep = "base_anthro";
     await sendText(api, waId, "¿Cuándo fue tu última Antropometría? (ej: 'hace 3 semanas' o 'no tengo')");
     return;
@@ -277,43 +207,31 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
     const t = normalizeText(text);
     if (!(t === "no" || t === "no se" || t === "no sé" || t === "nose")) {
       const bf = parseBodyFatPercent(text);
-      if (!bf) {
-        await sendText(api, waId, "Si lo sabés, pasame un número (ej: 18 o 22.5). Si no, 'no'.");
-        return;
-      }
+      if (!bf) { await sendText(api, waId, "Si lo sabés, pasame un número (ej: 18 o 22.5). Si no, 'no'."); return; }
       state.nutritionProfile.bodyFatPercent = bf;
     }
 
     state.nutritionStep = "analysis";
-    await sendText(
-      api,
-      waId,
+    await sendText(api, waId,
       "Perfecto ✅ Onboarding completo.\n\nAhora, para afinar el plan, respondeme en un solo mensaje:\n" +
-        "1) Proteína diaria (baja/media/alta o ejemplos)\n" +
-        "2) Agua por día\n" +
-        "3) Alcohol (nunca / 1-2 veces semana / más)\n" +
-        "4) Hambre o picoteo nocturno\n" +
-        "5) Energía al entrenar (con/sin energía)\n\n" +
-        "Opcional: ¿alguna preferencia o alimento que no comas?"
+      "1) Proteína diaria (baja/media/alta o ejemplos)\n" +
+      "2) Agua por día\n" +
+      "3) Alcohol (nunca / 1-2 veces semana / más)\n" +
+      "4) Hambre o picoteo nocturno\n" +
+      "5) Energía al entrenar (con/sin energía)\n\n" +
+      "Opcional: ¿alguna preferencia o alimento que no comas?"
     );
     return;
   }
 
-  // ======================
-  // ANALYSIS -> PLAN PIPELINE
-  // ======================
   if (step === "analysis") {
     state.nutritionProfile.analysisNotes = text.trim();
     state.nutritionStep = "done";
 
-    await sendText(
-      api,
-      waId,
-      "Estamos armando un plan inicial (7 días) a medida de tus necesidades. Te lo enviamos ni bien lo tengamos listo."
-    );
+    await sendText(api, waId, "Estamos armando un plan inicial (7 días) a medida de tus necesidades. Te lo enviamos ni bien lo tengamos listo.");
 
     try {
-      // 1) META 100% IA
+      // META
       const meta = await getMetaStrict(state.nutritionProfile);
 
       const diag = cleanStr(meta?.diagnostico_breve, 700);
@@ -325,47 +243,39 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
         api,
         waId,
         `🧠 *Diagnóstico breve:*\n${diag}\n\n` +
-          `🎯 *Targets diarios (aprox):* ${targets.kcal} kcal | *P* ${targets.proteina_g}g  *C* ${targets.carbos_g}g  *G* ${targets.grasas_g}g\n` +
-          `🍽️ *Comidas por día sugeridas:* ${mealsPerDay}\n` +
-          (pri.length ? `\n✅ *Prioridades (semana):*\n- ${pri.join("\n- ")}` : "") +
-          `\n\n_(Nota: macros/calorías son aproximados.)_`
+        `🎯 *Targets diarios (aprox):* ${targets.kcal} kcal | *P* ${targets.proteina_g}g  *C* ${targets.carbos_g}g  *G* ${targets.grasas_g}g\n` +
+        `🍽️ *Comidas por día sugeridas:* ${mealsPerDay}\n` +
+        (pri.length ? `\n✅ *Prioridades (semana):*\n- ${pri.join("\n- ")}` : "") +
+        `\n\n_(Nota: macros/calorías son aproximados.)_`
       );
 
-      // 2) Generar Días 1..7 (con progreso)
-      const days = [1, 2, 3, 4, 5, 6, 7];
-      const concurrency = 2; // más estable (evita 429)
-      const planByDay = new Map();
-
+      // ✅ STREAM: generar y ENVIAR cada día apenas sale
       await sendText(api, waId, "🧾 Generando tu dieta día por día…");
 
-      const settled = await asyncPool(concurrency, days, async (d) => {
-        if (d === 1 || d === 3 || d === 5 || d === 7) {
-          await sendText(api, waId, `⏳ Armando *Día ${d}/7*…`);
-        }
-        return getDayStrict(state.nutritionProfile, meta, d, mealsPerDay);
-      });
-
-      settled.forEach((r, idx) => {
-        const d = days[idx];
-        if (r.status === "fulfilled" && r.value) {
-          planByDay.set(d, r.value);
-        } else {
-          logDebug(`⚠️ Day ${d} failed (pool):`, r?.reason?.message || r?.reason);
-        }
-      });
-
       const plan_7_dias = [];
-      for (const d of days) {
-        if (planByDay.has(d)) {
-          plan_7_dias.push(planByDay.get(d));
-        } else {
-          await sendText(api, waId, `⏳ Reintentando *Día ${d}/7*…`);
-          const one = await getDayStrict(state.nutritionProfile, meta, d, mealsPerDay);
-          plan_7_dias.push(one);
+      for (let d = 1; d <= 7; d++) {
+        await sendText(api, waId, `⏳ Armando *Día ${d}/7*…`);
+
+        let dayObj;
+        try {
+          dayObj = await getDayStrict(state.nutritionProfile, meta, d, mealsPerDay);
+        } catch (eDay) {
+          console.error(`❌ Day ${d} failed:`, eDay?.message || eDay, { code: eDay?.code });
+          await sendText(api, waId, `⚠️ Se cortó generando el Día ${d}. Reintentá en 30 segundos.`);
+          return;
+        }
+
+        plan_7_dias.push(dayObj);
+
+        const ok = await sendDayDetailed(api, waId, dayObj);
+        if (!ok) {
+          console.error(`❌ Failed sending Day ${d} to WhatsApp`);
+          await sendText(api, waId, "⚠️ No pude enviar la dieta completa por WhatsApp. Reintentá en 30 segundos.");
+          return;
         }
       }
 
-      // 3) Lista compras desde el plan real
+      // Lista compras desde el plan real
       let listaCompras = [];
       try {
         const shopObj = await getPlanJson(buildShoppingPrompt(state.nutritionProfile, meta, plan_7_dias), {
@@ -386,18 +296,18 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
         derivacion: meta?.derivacion ?? null
       };
 
-      // 4) Enviar dieta completa
+      // al final mandamos extras (entrenamiento/lista/antropometría)
       await sendPlanDetailed(api, waId, planObj);
 
       return;
 
     } catch (e) {
-      logError("❌ Diet pipeline failed:", e?.message || e, { code: e?.code });
-      await sendText(api, waId, "⚠️ Se cortó la generación de la dieta. Reintentá en 30 segundos.");
+      // ✅ log SIEMPRE + motivo visible
+      console.error("❌ Diet pipeline failed:", e?.message || e, { code: e?.code, raw: e?.raw ? "(has raw)" : null });
+      await sendText(api, waId, `⚠️ Se cortó la generación de la dieta. (code: ${e?.code || "?"}) Reintentá en 30 segundos.`);
       return;
     }
   }
 
-  // Default
   await sendText(api, waId, "Listo. Si querés volver al menú: escribí 'volver al menu principal'.");
 }
