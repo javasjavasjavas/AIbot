@@ -2,7 +2,7 @@
 import { sendText } from "../whatsapp.js";
 import { cleanStr, cleanList } from "./sanitize.js";
 
-const WA_CHUNK_LIMIT = 650;   // más bajo para evitar "Leer más"
+const WA_CHUNK_LIMIT = 650;   // más bajo => menos "Leer más"
 const WA_HARD_LIMIT = 1200;
 
 function num(x) {
@@ -10,9 +10,7 @@ function num(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function bold(t) {
-  return `*${t}*`;
-}
+function bold(t) { return `*${t}*`; }
 
 function emojiForMeal(name = "") {
   const t = name.toLowerCase();
@@ -35,6 +33,31 @@ async function safeSend(api, waId, msg) {
   }
 }
 
+function chunkByLines(text, limit = WA_CHUNK_LIMIT) {
+  const s = cleanStr(text, WA_HARD_LIMIT * 6);
+  const lines = s.split("\n");
+  const chunks = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const candidate = cur ? `${cur}\n${line}` : line;
+    if (candidate.length <= limit) {
+      cur = candidate;
+      continue;
+    }
+    if (cur) chunks.push(cur);
+
+    if (line.length > limit) {
+      for (let i = 0; i < line.length; i += limit) chunks.push(line.slice(i, i + limit));
+      cur = "";
+    } else {
+      cur = line;
+    }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 function fmtMeal(meal, index) {
   const name = cleanStr(meal?.nombre, 70) || `Comida ${index + 1}`;
   const kcal = num(meal?.kcal);
@@ -48,11 +71,10 @@ function fmtMeal(meal, index) {
       ? meal.opciones
       : [];
 
-  const safeItems = cleanList(items, 10, 160);
+  const safeItems = cleanList(items, 12, 160);
 
   const header = `${emojiForMeal(name)} ${bold(name)} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g`;
   const body = safeItems.length ? safeItems.map(i => `- ${cleanStr(i, 180)}`).join("\n") : "- (sin items)";
-
   return `${header}\n${body}`;
 }
 
@@ -65,59 +87,30 @@ function fmtDayHeader(dayObj) {
   );
 }
 
-function chunkByLines(text, limit = WA_CHUNK_LIMIT) {
-  const s = cleanStr(text, WA_HARD_LIMIT * 4);
-  const lines = s.split("\n");
-  const chunks = [];
-  let cur = "";
-
-  for (const line of lines) {
-    const candidate = cur ? `${cur}\n${line}` : line;
-    if (candidate.length <= limit) {
-      cur = candidate;
-      continue;
-    }
-    if (cur) chunks.push(cur);
-
-    // si una línea sola es muy larga, cortamos duro
-    if (line.length > limit) {
-      for (let i = 0; i < line.length; i += limit) {
-        chunks.push(line.slice(i, i + limit));
-      }
-      cur = "";
-    } else {
-      cur = line;
-    }
-  }
-
-  if (cur) chunks.push(cur);
-  return chunks;
-}
-
-async function sendDay(api, waId, dayObj) {
-  // Header
-  if (!(await safeSend(api, waId, cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT)))) return;
+// ✅ export: enviar UN DÍA completo (header + comidas chunked)
+export async function sendDayDetailed(api, waId, dayObj) {
+  const header = cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT);
+  if (!(await safeSend(api, waId, header))) return false;
 
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
   for (let i = 0; i < meals.length; i++) {
     const block = fmtMeal(meals[i], i);
+
     if (block.length <= WA_CHUNK_LIMIT) {
-      const ok = await safeSend(api, waId, cleanStr(block, WA_HARD_LIMIT));
-      if (!ok) return;
+      if (!(await safeSend(api, waId, cleanStr(block, WA_HARD_LIMIT)))) return false;
     } else {
       const parts = chunkByLines(block, WA_CHUNK_LIMIT);
       for (const p of parts) {
-        const ok = await safeSend(api, waId, cleanStr(p, WA_HARD_LIMIT));
-        if (!ok) return;
+        if (!(await safeSend(api, waId, cleanStr(p, WA_HARD_LIMIT)))) return false;
       }
     }
   }
+  return true;
 }
 
 function formatShoppingList(lista) {
   if (!Array.isArray(lista) || !lista.length) return null;
 
-  // objetos: {categoria,item,cantidad_aprox}
   if (typeof lista[0] === "object" && lista[0] !== null) {
     const grouped = {};
     for (const it of lista) {
@@ -143,8 +136,7 @@ function formatShoppingList(lista) {
     return lines.join("\n").trim();
   }
 
-  // strings legacy
-  const clean = cleanList(lista, 40, 120);
+  const clean = cleanList(lista, 50, 120);
   return `🛒 ${bold("Lista de compras semanal")}\n` + clean.map(i => `- ${i}`).join("\n");
 }
 
@@ -163,9 +155,7 @@ export async function sendPlanDetailed(api, waId, planObj) {
 
   for (let d = 1; d <= 7; d++) {
     const dayObj = byDay.get(d);
-    if (dayObj) {
-      await sendDay(api, waId, dayObj);
-    }
+    if (dayObj) await sendDayDetailed(api, waId, dayObj);
   }
 
   const train = cleanList(planObj?.entrenamiento_complementario, 4, 220);
