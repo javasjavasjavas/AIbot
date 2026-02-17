@@ -11,7 +11,7 @@ export function whatsappSafeText(text) {
     .trim();
 }
 
-// Split MUY seguro para WhatsApp (900 chars)
+// Split seguro para WhatsApp (900 chars).
 export function splitForWhatsApp(text, maxLen = 900) {
   const t = whatsappSafeText(text);
   if (t.length <= maxLen) return [t];
@@ -25,11 +25,9 @@ export function splitForWhatsApp(text, maxLen = 900) {
     current = "";
   };
 
-  // Partimos por líneas primero
   const lines = t.split("\n");
 
   for (const line of lines) {
-    // si una línea es gigante, la partimos por oraciones
     if (line.length > maxLen) {
       const sentences = line.split(/(?<=[.!?])\s+/);
       for (const s of sentences) {
@@ -54,11 +52,11 @@ export function splitForWhatsApp(text, maxLen = 900) {
   return parts.length ? parts : [t.slice(0, maxLen)];
 }
 
-if (process.env.LOG_LEVEL === "debug") {
-  console.log("➡️ sendText len:", (text || "").length);
-}
+const DEBUG_SEND = process.env.LOG_LEVEL === "debug";
 
 export async function sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, text) {
+  if (DEBUG_SEND) console.log("sendText len:", (text || "").length);
+
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
   const r = await fetch(url, {
     method: "POST",
@@ -102,7 +100,7 @@ export async function sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, imageUr
   }
 }
 
-// default maxLen 900 para evitar cortes
+// Default maxLen 900 para evitar cortes.
 export async function sendLongText(api, to, text, maxLen = 900) {
   const chunks = splitForWhatsApp(text, maxLen);
   if (chunks.length === 1) {
