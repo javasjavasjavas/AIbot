@@ -19,6 +19,40 @@ function safeJsonParse(s) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
+function stripCodeFences(s) {
+  return String(s || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function extractJsonObjectText(s) {
+  const t = String(s || "");
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start >= 0 && end > start) return t.slice(start, end + 1).trim();
+  return t.trim();
+}
+
+function parseJsonLoose(raw) {
+  const base = String(raw || "").trim();
+  if (!base) return null;
+
+  const candidates = [
+    base,
+    stripCodeFences(base),
+    extractJsonObjectText(base),
+    extractJsonObjectText(stripCodeFences(base))
+  ];
+
+  for (const text of candidates) {
+    const obj = safeJsonParse(text);
+    if (obj) return obj;
+  }
+
+  return null;
+}
+
 function isRetriableStatus(code) {
   return code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
 }
@@ -46,7 +80,7 @@ async function fetchGemini(url, payload) {
 
 export async function callGemini(
   prompt,
-  { responseMimeType, maxOutputTokens = 2600, temperature = 0.2 } = {}
+  { responseMimeType, maxOutputTokens = 4200, temperature = 0.2 } = {}
 ) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
@@ -62,7 +96,6 @@ export async function callGemini(
     }
   };
 
-  // ✅ retry/backoff para 429/5xx
   const backoffs = [0, 900, 1800, 3000];
   let lastErr = null;
 
@@ -72,17 +105,21 @@ export async function callGemini(
     try {
       const data = await fetchGemini(url, payload);
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+      const finishReason = data?.candidates?.[0]?.finishReason || "";
+      if (finishReason && finishReason !== "STOP") {
+        logWarn(`Gemini finishReason=${finishReason} (maxOutputTokens=${maxOutputTokens})`);
+      }
       return text;
     } catch (e) {
       lastErr = e;
       const code = Number(e?.code || 0);
 
       if (isRetriableStatus(code) && i < backoffs.length - 1) {
-        logWarn(`⚠️ Gemini retriable (${code}). Retry ${i + 1}/${backoffs.length - 1}`);
+        logWarn(`Gemini retriable (${code}). Retry ${i + 1}/${backoffs.length - 1}`);
         continue;
       }
 
-      logError("❌ Gemini call failed:", e?.message || e);
+      logError("Gemini call failed:", e?.message || e);
       throw e;
     }
   }
@@ -97,41 +134,44 @@ export async function getJsonWithRepair(prompt, { requireKeys = [], attempts = 3
     const raw = await callGemini(prompt, {
       responseMimeType: "application/json",
       temperature: i === 1 ? 0.25 : 0.0,
-      maxOutputTokens: 2600
+      maxOutputTokens: 4200
     });
 
     lastRaw = raw;
-    const obj = safeJsonParse(raw);
+    const obj = parseJsonLoose(raw);
     if (obj && requireKeys.every(k => obj[k] !== undefined)) return obj;
 
     const repairPrompt =
-      `Devolvé SOLO JSON VÁLIDO (sin texto extra, sin markdown). ` +
-      `Repará y completá este JSON para que cumpla el esquema requerido.\n\nJSON a reparar:\n${raw}`;
+      "Devolve SOLO JSON VALIDO (sin texto extra, sin markdown). " +
+      "Si hay texto extra, extrae el objeto JSON. Si esta incompleto, cerra y completa solo lo minimo " +
+      "para cumplir claves requeridas. Manten estructura y tipos.\n\nJSON a reparar:\n" +
+      raw;
 
     const repaired = await callGemini(repairPrompt, {
       responseMimeType: "application/json",
       temperature: 0.0,
-      maxOutputTokens: 2600
+      maxOutputTokens: 4200
     });
 
-    const obj2 = safeJsonParse(repaired);
+    const obj2 = parseJsonLoose(repaired);
     if (obj2 && requireKeys.every(k => obj2[k] !== undefined)) return obj2;
 
-    logDebug("🔎 getJsonWithRepair attempt failed", i, { lastRawPreview: String(lastRaw).slice(0, 220) });
+    logDebug("getJsonWithRepair attempt failed", i, { lastRawPreview: String(lastRaw).slice(0, 220) });
   }
 
-  // Último ultra-estricto
   const force = await callGemini(
-    `DEVOLVÉ SOLO JSON VÁLIDO. Sin explicaciones. Sin texto extra.\n\n${prompt}`,
-    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 2600 }
+    "DEVOLVE SOLO JSON VALIDO. Sin explicaciones. Sin texto extra. " +
+    "Sin markdown. Sin comentarios. Solo objeto JSON completo y parseable.\n\n" +
+    prompt,
+    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 4200 }
   );
 
-  const obj3 = safeJsonParse(force);
+  const obj3 = parseJsonLoose(force);
   if (obj3 && requireKeys.every(k => obj3[k] !== undefined)) return obj3;
 
   const err = new Error("Failed to get valid JSON from Gemini after repairs");
   err.lastRaw = lastRaw;
-  logError("❌ JSON parse/repair failed. lastRaw preview:", String(lastRaw).slice(0, 500));
+  logError("JSON parse/repair failed. lastRaw preview:", String(lastRaw).slice(0, 500));
   throw err;
 }
 
