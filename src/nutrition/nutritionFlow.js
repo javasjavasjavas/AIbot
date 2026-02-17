@@ -1,4 +1,9 @@
 // src/nutrition/nutritionFlow.js
+// Flow de Nutrición (onboarding + plan) - WhatsApp-safe, 100% IA (Gemini) para diagnóstico/targets/prioridades y dieta.
+// Mantiene el flow/preguntas originales + agrega actividad física después de "sexo".
+// Envío del plan: chunked en sender.js para evitar cortes.
+// Robustez: retry/repair JSON en geminiClient + try/catch global en pipeline dieta para no cortarse a mitad.
+
 import { sendText } from "../whatsapp.js";
 
 import { getState } from "./state.js";
@@ -91,7 +96,6 @@ async function asyncPool(limit, items, iteratorFn) {
 // STRICT GENERATION (NO HARDCODE)
 // ======================
 async function getMetaStrict(profile) {
-  // intentos “normales”
   for (let i = 1; i <= 3; i++) {
     const meta = await getPlanJson(buildMetaPrompt(profile), {
       requireKeys: ["diagnostico_breve", "targets_diarios", "comidas_por_dia", "prioridades_semana"],
@@ -102,7 +106,6 @@ async function getMetaStrict(profile) {
     if (v.ok) return meta;
   }
 
-  // intentos “hard”
   const hardPrompt =
     buildMetaPrompt(profile) +
     "\n\nIMPORTANTE: Ningún valor numérico puede ser 0. Respetá el esquema EXACTO. No agregues campos.";
@@ -131,8 +134,8 @@ async function getDayStrict(profile, meta, day, mealsPerDay) {
 
   const hardPrompt =
     buildDayPrompt(profile, { ...meta, comidas_por_dia: mealsPerDay }, day) +
-    "\n\nIMPORTANTE: Ninguna comida ni total puede tener kcal/macros en 0. Total_dia debe ser coherente con la suma. " +
-    "Respetá EXACTAMENTE la cantidad de comidas.";
+    "\n\nIMPORTANTE: Ninguna comida ni total puede tener kcal/macros en 0. " +
+    "Total_dia debe ser coherente con la suma. Respetá EXACTAMENTE la cantidad de comidas.";
 
   const last = await getPlanJson(hardPrompt, { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 });
   const v2 = validateDayPlan(last, mealsPerDay);
@@ -171,6 +174,7 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
     return;
   }
 
+  // Garantizar flujo nutrition
   if (state.flow !== "nutrition") {
     state.flow = "nutrition";
     state.nutritionStep = state.nutritionStep || "objective";
@@ -178,10 +182,18 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   const step = state.nutritionStep;
 
+  // ======================
+  // STEPS
+  // ======================
+
   if (step === "objective") {
     const obj = parseObjective(text);
     if (!obj) {
-      await sendText(api, waId, "Decime tu objetivo: A) bajar grasa B) ganar músculo C) recomposición D) rendimiento E) salud general");
+      await sendText(
+        api,
+        waId,
+        "Decime tu objetivo: A) bajar grasa B) ganar músculo C) recomposición D) rendimiento E) salud general"
+      );
       return;
     }
     state.nutritionProfile.objective = obj;
@@ -192,7 +204,10 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_weight") {
     const w = parseWeightKg(text);
-    if (!w) { await sendText(api, waId, "Peso inválido. Pasame un número en kg (ej: 72 o 72.5)."); return; }
+    if (!w) {
+      await sendText(api, waId, "Peso inválido. Pasame un número en kg (ej: 72 o 72.5).");
+      return;
+    }
     state.nutritionProfile.weightKg = w;
     state.nutritionStep = "base_height";
     await sendText(api, waId, "¿Altura? (175 o 1.75)");
@@ -201,7 +216,10 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_height") {
     const h = parseHeightCm(text);
-    if (!h) { await sendText(api, waId, "Altura inválida. Pasame 175 o 1.75."); return; }
+    if (!h) {
+      await sendText(api, waId, "Altura inválida. Pasame 175 o 1.75.");
+      return;
+    }
     state.nutritionProfile.heightCm = h;
     state.nutritionStep = "base_age";
     await sendText(api, waId, "¿Edad? (solo número)");
@@ -210,7 +228,10 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_age") {
     const age = parseAge(text);
-    if (!age) { await sendText(api, waId, "Edad inválida. Pasame un número (ej: 29)."); return; }
+    if (!age) {
+      await sendText(api, waId, "Edad inválida. Pasame un número (ej: 29).");
+      return;
+    }
     state.nutritionProfile.age = age;
     state.nutritionStep = "base_sex";
     await sendText(api, waId, "¿Sexo? (masculino / femenino / no binario / prefiero no decir)");
@@ -219,9 +240,13 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_sex") {
     const sx = parseSex(text);
-    if (!sx) { await sendText(api, waId, "Decime: masculino / femenino / no binario / prefiero no decir."); return; }
+    if (!sx) {
+      await sendText(api, waId, "Decime: masculino / femenino / no binario / prefiero no decir.");
+      return;
+    }
     state.nutritionProfile.sex = sx;
 
+    // ✅ NUEVO: actividad física
     state.nutritionStep = "base_activity";
     await sendText(api, waId, "¿Hacés actividad física? ¿Cuántas veces por semana? (ej: 0 / 3 / 5)");
     return;
@@ -229,7 +254,10 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
 
   if (step === "base_activity") {
     const n = parseActivityPerWeek(text);
-    if (n === null) { await sendText(api, waId, "Decime un número de veces por semana (0 a 14). Ej: 0 / 3 / 5"); return; }
+    if (n === null) {
+      await sendText(api, waId, "Decime un número de veces por semana (0 a 14). Ej: 0 / 3 / 5");
+      return;
+    }
     state.nutritionProfile.activityPerWeek = n;
 
     state.nutritionStep = "base_anthro";
@@ -249,105 +277,127 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
     const t = normalizeText(text);
     if (!(t === "no" || t === "no se" || t === "no sé" || t === "nose")) {
       const bf = parseBodyFatPercent(text);
-      if (!bf) { await sendText(api, waId, "Si lo sabés, pasame un número (ej: 18 o 22.5). Si no, 'no'."); return; }
+      if (!bf) {
+        await sendText(api, waId, "Si lo sabés, pasame un número (ej: 18 o 22.5). Si no, 'no'.");
+        return;
+      }
       state.nutritionProfile.bodyFatPercent = bf;
     }
 
     state.nutritionStep = "analysis";
-    await sendText(api, waId,
+    await sendText(
+      api,
+      waId,
       "Perfecto ✅ Onboarding completo.\n\nAhora, para afinar el plan, respondeme en un solo mensaje:\n" +
-      "1) Proteína diaria (baja/media/alta o ejemplos)\n" +
-      "2) Agua por día\n" +
-      "3) Alcohol (nunca / 1-2 veces semana / más)\n" +
-      "4) Hambre o picoteo nocturno\n" +
-      "5) Energía al entrenar (con/sin energía)\n\n" +
-      "Opcional: ¿alguna preferencia o alimento que no comas?"
+        "1) Proteína diaria (baja/media/alta o ejemplos)\n" +
+        "2) Agua por día\n" +
+        "3) Alcohol (nunca / 1-2 veces semana / más)\n" +
+        "4) Hambre o picoteo nocturno\n" +
+        "5) Energía al entrenar (con/sin energía)\n\n" +
+        "Opcional: ¿alguna preferencia o alimento que no comas?"
     );
     return;
   }
 
+  // ======================
+  // ANALYSIS -> PLAN PIPELINE
+  // ======================
   if (step === "analysis") {
     state.nutritionProfile.analysisNotes = text.trim();
     state.nutritionStep = "done";
 
-    await sendText(api, waId, "Estamos armando un plan inicial (7 días) a medida de tus necesidades. Te lo enviamos ni bien lo tengamos listo.");
-
-    // 1) META 100% IA
-    let meta;
-    try {
-      meta = await getMetaStrict(state.nutritionProfile);
-    } catch (e) {
-      // ✅ log real del error para debug
-      logError("❌ META failed:", e?.message || e, { code: e?.code, raw: e?.raw ? "(has raw)" : null });
-      await sendText(api, waId, "Hubo un problema generando tu diagnóstico/targets. Reintentá en 30 segundos.");
-      return;
-    }
-
-    const diag = cleanStr(meta?.diagnostico_breve, 700);
-    const targets = meta?.targets_diarios || {};
-    const mealsPerDay = Math.max(3, Math.min(6, Number(meta?.comidas_por_dia || 4)));
-    const pri = cleanList(meta?.prioridades_semana, 6, 220);
-
     await sendText(
       api,
       waId,
-      `🧠 *Diagnóstico breve:*\n${diag}\n\n` +
-      `🎯 *Targets diarios (aprox):* ${targets.kcal} kcal | *P* ${targets.proteina_g}g  *C* ${targets.carbos_g}g  *G* ${targets.grasas_g}g\n` +
-      `🍽️ *Comidas por día sugeridas:* ${mealsPerDay}\n` +
-      (pri.length ? `\n✅ *Prioridades (semana):*\n- ${pri.join("\n- ")}` : "") +
-      `\n\n_(Nota: macros/calorías son aproximados.)_`
+      "Estamos armando un plan inicial (7 días) a medida de tus necesidades. Te lo enviamos ni bien lo tengamos listo."
     );
 
-    // 2) DÍAS 1..7
-    const days = [1,2,3,4,5,6,7];
-    const settled = await asyncPool(3, days, async (d) => getDayStrict(state.nutritionProfile, meta, d, mealsPerDay));
+    try {
+      // 1) META 100% IA
+      const meta = await getMetaStrict(state.nutritionProfile);
 
-    const planByDay = new Map();
-    settled.forEach((r, idx) => {
-      const d = days[idx];
-      if (r.status === "fulfilled" && r.value) planByDay.set(d, r.value);
-      else logDebug(`⚠️ Day ${d} failed (pool):`, r?.reason?.message || r?.reason);
-    });
+      const diag = cleanStr(meta?.diagnostico_breve, 700);
+      const targets = meta?.targets_diarios || {};
+      const mealsPerDay = Math.max(3, Math.min(6, Number(meta?.comidas_por_dia || 4)));
+      const pri = cleanList(meta?.prioridades_semana, 6, 220);
 
-    const plan_7_dias = [];
-    for (const d of days) {
-      if (planByDay.has(d)) plan_7_dias.push(planByDay.get(d));
-      else {
-        try {
+      await sendText(
+        api,
+        waId,
+        `🧠 *Diagnóstico breve:*\n${diag}\n\n` +
+          `🎯 *Targets diarios (aprox):* ${targets.kcal} kcal | *P* ${targets.proteina_g}g  *C* ${targets.carbos_g}g  *G* ${targets.grasas_g}g\n` +
+          `🍽️ *Comidas por día sugeridas:* ${mealsPerDay}\n` +
+          (pri.length ? `\n✅ *Prioridades (semana):*\n- ${pri.join("\n- ")}` : "") +
+          `\n\n_(Nota: macros/calorías son aproximados.)_`
+      );
+
+      // 2) Generar Días 1..7 (con progreso)
+      const days = [1, 2, 3, 4, 5, 6, 7];
+      const concurrency = 2; // más estable (evita 429)
+      const planByDay = new Map();
+
+      await sendText(api, waId, "🧾 Generando tu dieta día por día…");
+
+      const settled = await asyncPool(concurrency, days, async (d) => {
+        if (d === 1 || d === 3 || d === 5 || d === 7) {
+          await sendText(api, waId, `⏳ Armando *Día ${d}/7*…`);
+        }
+        return getDayStrict(state.nutritionProfile, meta, d, mealsPerDay);
+      });
+
+      settled.forEach((r, idx) => {
+        const d = days[idx];
+        if (r.status === "fulfilled" && r.value) {
+          planByDay.set(d, r.value);
+        } else {
+          logDebug(`⚠️ Day ${d} failed (pool):`, r?.reason?.message || r?.reason);
+        }
+      });
+
+      const plan_7_dias = [];
+      for (const d of days) {
+        if (planByDay.has(d)) {
+          plan_7_dias.push(planByDay.get(d));
+        } else {
+          await sendText(api, waId, `⏳ Reintentando *Día ${d}/7*…`);
           const one = await getDayStrict(state.nutritionProfile, meta, d, mealsPerDay);
           plan_7_dias.push(one);
-        } catch (e) {
-          logError(`❌ Day ${d} final failed:`, e?.message || e);
-          await sendText(api, waId, `No pude generar el Día ${d} con valores consistentes. Reintentá en 30 segundos.`);
-          return;
         }
       }
-    }
 
-    // 3) Lista compras (del plan real)
-    let listaCompras = [];
-    try {
-      const shopObj = await getPlanJson(buildShoppingPrompt(state.nutritionProfile, meta, plan_7_dias), {
-        requireKeys: ["lista_compras"],
-        attempts: 2
-      });
-      listaCompras = Array.isArray(shopObj?.lista_compras) ? shopObj.lista_compras : [];
+      // 3) Lista compras desde el plan real
+      let listaCompras = [];
+      try {
+        const shopObj = await getPlanJson(buildShoppingPrompt(state.nutritionProfile, meta, plan_7_dias), {
+          requireKeys: ["lista_compras"],
+          attempts: 2
+        });
+        listaCompras = Array.isArray(shopObj?.lista_compras) ? shopObj.lista_compras : [];
+      } catch (e) {
+        logError("❌ Shopping failed:", e?.message || e);
+      }
+
+      const planObj = {
+        diagnostico_breve: diag,
+        plan_7_dias,
+        entrenamiento_complementario: meta?.entrenamiento_complementario || [],
+        lista_compras: listaCompras,
+        sugerir_antropometria: meta?.sugerir_antropometria ?? null,
+        derivacion: meta?.derivacion ?? null
+      };
+
+      // 4) Enviar dieta completa
+      await sendPlanDetailed(api, waId, planObj);
+
+      return;
+
     } catch (e) {
-      logError("❌ Shopping failed:", e?.message || e);
+      logError("❌ Diet pipeline failed:", e?.message || e, { code: e?.code });
+      await sendText(api, waId, "⚠️ Se cortó la generación de la dieta. Reintentá en 30 segundos.");
+      return;
     }
-
-    const planObj = {
-      diagnostico_breve: diag,
-      plan_7_dias,
-      entrenamiento_complementario: meta?.entrenamiento_complementario || [],
-      lista_compras: listaCompras,
-      sugerir_antropometria: meta?.sugerir_antropometria ?? null,
-      derivacion: meta?.derivacion ?? null
-    };
-
-    await sendPlanDetailed(api, waId, planObj);
-    return;
   }
 
+  // Default
   await sendText(api, waId, "Listo. Si querés volver al menú: escribí 'volver al menu principal'.");
 }
