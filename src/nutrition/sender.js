@@ -1,13 +1,8 @@
-// src/nutrition/sender.js
 import { sendText } from "../whatsapp.js";
 import { cleanStr, cleanList } from "./sanitize.js";
 
-// ======================
-// CONFIG WHATSAPP SAFE
-// ======================
-
-const WA_CHUNK_LIMIT = 800;   // límite visual antes de "Leer más"
-const WA_HARD_LIMIT = 1200;   // límite máximo seguro por mensaje
+const WA_CHUNK_LIMIT = 650;  // más bajo para evitar "Leer más"
+const WA_HARD_LIMIT = 1200;
 
 function num(x) {
   const n = Number(x);
@@ -29,12 +24,8 @@ function emojiForMeal(name = "") {
   return "🍽️";
 }
 
-// ======================
-// FORMATEO DE COMIDAS
-// ======================
-
 function fmtMeal(meal, index) {
-  const name = cleanStr(meal?.nombre, 60) || `Comida ${index + 1}`;
+  const name = cleanStr(meal?.nombre, 70) || `Comida ${index + 1}`;
   const kcal = num(meal?.kcal);
   const p = num(meal?.proteina_g);
   const c = num(meal?.carbos_g);
@@ -46,186 +37,137 @@ function fmtMeal(meal, index) {
       ? meal.opciones
       : [];
 
-  const safeItems = cleanList(items, 8, 150);
+  const safeItems = cleanList(items, 10, 160);
 
-  return (
-    `${emojiForMeal(name)} ${bold(name)} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g\n` +
-    safeItems.map(i => `- ${cleanStr(i, 160)}`).join("\n")
-  );
+  const header = `${emojiForMeal(name)} ${bold(name)} — ${kcal} kcal | P ${p}g C ${c}g G ${f}g`;
+  const body = safeItems.length ? safeItems.map(i => `- ${cleanStr(i, 180)}`).join("\n") : "- (sin items)";
+
+  return `${header}\n${body}`;
 }
 
 function fmtDayHeader(dayObj) {
   const dia = num(dayObj?.dia);
   const total = dayObj?.total_dia || {};
-
   return (
     `📅 ${bold(`Plan nutricional — Día ${dia}`)}\n` +
-    `🎯 ${bold("Total día")}: ${num(total.kcal)} kcal | ` +
-    `P ${num(total.proteina_g)}g C ${num(total.carbos_g)}g G ${num(total.grasas_g)}g`
+    `🎯 ${bold("Total día")}: ${num(total.kcal)} kcal | P ${num(total.proteina_g)}g C ${num(total.carbos_g)}g G ${num(total.grasas_g)}g`
   );
 }
 
-// ======================
-// CHUNKING (ANTI CORTE)
-// ======================
-
-function chunkByBlocks(blocks) {
+function chunkByLines(text, limit = WA_CHUNK_LIMIT) {
+  const s = cleanStr(text, WA_HARD_LIMIT * 4);
+  const lines = s.split("\n");
   const chunks = [];
-  let current = "";
+  let cur = "";
 
-  for (const block of blocks) {
-    const candidate = current ? `${current}\n\n${block}` : block;
-
-    if (candidate.length <= WA_CHUNK_LIMIT) {
-      current = candidate;
+  for (const line of lines) {
+    const candidate = cur ? `${cur}\n${line}` : line;
+    if (candidate.length <= limit) {
+      cur = candidate;
       continue;
     }
+    if (cur) chunks.push(cur);
 
-    if (current) chunks.push(current);
-
-    if (block.length > WA_CHUNK_LIMIT) {
-      // dividir por líneas
-      const lines = block.split("\n");
-      let sub = "";
-      for (const line of lines) {
-        const cand = sub ? `${sub}\n${line}` : line;
-        if (cand.length <= WA_CHUNK_LIMIT) {
-          sub = cand;
-        } else {
-          if (sub) chunks.push(sub);
-          sub = line;
-        }
+    // si una línea sola es muy larga, cortamos duro
+    if (line.length > limit) {
+      for (let i = 0; i < line.length; i += limit) {
+        chunks.push(line.slice(i, i + limit));
       }
-      if (sub) chunks.push(sub);
-      current = "";
+      cur = "";
     } else {
-      current = block;
+      cur = line;
     }
   }
-
-  if (current) chunks.push(current);
-
+  if (cur) chunks.push(cur);
   return chunks;
 }
 
 async function sendDay(api, waId, dayObj) {
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
 
-  const blocks = [
-    fmtDayHeader(dayObj),
-    ...meals.map((m, i) => fmtMeal(m, i))
-  ];
+  // ✅ estrategia: 1 mensaje = header, y luego 1 mensaje por comida
+  // si una comida excede, la partimos por líneas
+  await sendText(api, waId, cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT));
 
-  const chunks = chunkByBlocks(blocks);
-
-  for (const msg of chunks) {
-    await sendText(api, waId, cleanStr(msg, WA_HARD_LIMIT));
+  for (let i = 0; i < meals.length; i++) {
+    const block = fmtMeal(meals[i], i);
+    if (block.length <= WA_CHUNK_LIMIT) {
+      await sendText(api, waId, cleanStr(block, WA_HARD_LIMIT));
+    } else {
+      const parts = chunkByLines(block, WA_CHUNK_LIMIT);
+      for (const p of parts) {
+        await sendText(api, waId, cleanStr(p, WA_HARD_LIMIT));
+      }
+    }
   }
 }
-
-// ======================
-// LISTA DE COMPRAS
-// ======================
 
 function formatShoppingList(lista) {
   if (!Array.isArray(lista) || !lista.length) return null;
 
-  // Caso nuevo: objetos con categoria
-  if (typeof lista[0] === "object") {
+  // objetos: {categoria,item,cantidad_aprox}
+  if (typeof lista[0] === "object" && lista[0] !== null) {
     const grouped = {};
-
-    for (const item of lista) {
-      const cat = item.categoria || "otros";
+    for (const it of lista) {
+      const cat = cleanStr(it?.categoria || "otros", 40).toLowerCase();
       if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push(item);
+      grouped[cat].push({
+        item: cleanStr(it?.item || "", 80),
+        qty: cleanStr(it?.cantidad_aprox || "", 40)
+      });
     }
 
-    let out = `🛒 ${bold("Lista de compras semanal")}\n`;
+    const order = ["proteinas", "carbohidratos", "frutas_verduras", "lacteos", "grasas", "varios", "otros"];
+    const cats = [...new Set([...order.filter(c => grouped[c]), ...Object.keys(grouped)])];
 
-    for (const cat of Object.keys(grouped)) {
-      out += `\n${bold(cat.toUpperCase())}\n`;
-      for (const it of grouped[cat]) {
-        out += `- ${it.item}${it.cantidad_aprox ? ` (${it.cantidad_aprox})` : ""}\n`;
+    const lines = [`🛒 ${bold("Lista de compras semanal")}`];
+    for (const c of cats) {
+      lines.push(`\n${bold(c.replaceAll("_", " ").toUpperCase())}`);
+      for (const x of grouped[c]) {
+        if (!x.item) continue;
+        lines.push(`- ${x.item}${x.qty ? ` (${x.qty})` : ""}`);
       }
     }
-
-    return out.trim();
+    return lines.join("\n").trim();
   }
 
-  // Caso viejo: array de strings
+  // strings legacy
   const clean = cleanList(lista, 40, 120);
-  return (
-    `🛒 ${bold("Lista de compras semanal")}\n` +
-    clean.map(i => `- ${i}`).join("\n")
-  );
+  return `🛒 ${bold("Lista de compras semanal")}\n` + clean.map(i => `- ${i}`).join("\n");
 }
 
-// ======================
-// MAIN EXPORT
-// ======================
-
-export async function sendPlanDetailed(api, waId, planObj, profile) {
-  // 1️⃣ PLAN 7 DÍAS
-  const plan = Array.isArray(planObj?.plan_7_dias)
-    ? planObj.plan_7_dias
-    : [];
-
+export async function sendPlanDetailed(api, waId, planObj) {
+  const plan = Array.isArray(planObj?.plan_7_dias) ? planObj.plan_7_dias : [];
   if (!plan.length) {
-    await sendText(api, waId, "No pude generar el plan completo. Intentemos nuevamente.");
+    await sendText(api, waId, "No pude generar el plan completo. Probemos de nuevo.");
     return;
   }
 
   const byDay = new Map();
   for (const d of plan) {
     const n = num(d?.dia);
-    if (n >= 1 && n <= 7 && !byDay.has(n)) {
-      byDay.set(n, d);
-    }
+    if (n >= 1 && n <= 7 && !byDay.has(n)) byDay.set(n, d);
   }
 
   for (let d = 1; d <= 7; d++) {
-    if (byDay.has(d)) {
-      await sendDay(api, waId, byDay.get(d));
-    }
+    const dayObj = byDay.get(d);
+    if (dayObj) await sendDay(api, waId, dayObj);
   }
 
-  // 2️⃣ ENTRENAMIENTO COMPLEMENTARIO
-  if (Array.isArray(planObj?.entrenamiento_complementario) &&
-      planObj.entrenamiento_complementario.length) {
-
-    const train = cleanList(planObj.entrenamiento_complementario, 4, 220);
-
-    await sendText(
-      api,
-      waId,
-      `🏋️ ${bold("Entrenamiento complementario")}:\n` +
-      train.map(t => `- ${t}`).join("\n")
-    );
+  const train = cleanList(planObj?.entrenamiento_complementario, 4, 220);
+  if (train.length) {
+    await sendText(api, waId, `🏋️ ${bold("Entrenamiento complementario")}:\n- ${train.join("\n- ")}`);
   }
 
-  // 3️⃣ LISTA DE COMPRAS
   const shoppingMsg = formatShoppingList(planObj?.lista_compras);
   if (shoppingMsg) {
-    const chunks = chunkByBlocks([shoppingMsg]);
-    for (const msg of chunks) {
-      await sendText(api, waId, cleanStr(msg, WA_HARD_LIMIT));
-    }
+    const parts = chunkByLines(shoppingMsg, WA_CHUNK_LIMIT);
+    for (const p of parts) await sendText(api, waId, cleanStr(p, WA_HARD_LIMIT));
   }
 
-  // 4️⃣ ANTROPOMETRÍA / DERIVACIÓN
-  if (planObj?.sugerir_antropometria) {
-    await sendText(
-      api,
-      waId,
-      `📏 ${bold("Antropometría")}:\n${cleanStr(planObj.sugerir_antropometria, 400)}`
-    );
-  }
+  const ant = cleanStr(planObj?.sugerir_antropometria ?? "", 380);
+  const der = cleanStr(planObj?.derivacion ?? "", 380);
 
-  if (planObj?.derivacion) {
-    await sendText(
-      api,
-      waId,
-      `🩺 ${bold("Derivación sugerida")}:\n${cleanStr(planObj.derivacion, 400)}`
-    );
-  }
+  if (ant) await sendText(api, waId, `📏 ${bold("Antropometría")}:\n${ant}`);
+  if (der) await sendText(api, waId, `🩺 ${bold("Derivación sugerida")}:\n${der}`);
 }
