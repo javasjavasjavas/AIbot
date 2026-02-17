@@ -97,6 +97,50 @@ DEVOLVÉ SOLO JSON VÁLIDO:
 `.trim();
 }
 
+// Prompt corto para evitar truncado (MAX_TOKENS) en dias.
+export function buildDayPromptCompact(profile, meta, day) {
+  const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";
+  const t = meta?.targets_diarios || {};
+  const nMeals = meta?.comidas_por_dia || 4;
+
+  return `
+Sos nutricionista deportivo. Responde SOLO JSON valido.
+
+Usuario:
+- objetivo: ${goal}
+- actividad: ${profile.activityPerWeek ?? "N/A"} / semana
+- contexto: ${profile.analysisNotes ?? "N/A"}
+
+Dia ${day}:
+- comidas_por_dia: ${nMeals}
+- target_kcal: ${t.kcal ?? 0}
+- target_p: ${t.proteina_g ?? 0}
+- target_c: ${t.carbos_g ?? 0}
+- target_g: ${t.grasas_g ?? 0}
+
+Reglas obligatorias:
+- EXACTAMENTE ${nMeals} comidas.
+- Cada comida: nombre corto + items (2 a 4 items max).
+- Cada item: texto corto con cantidad real (ej: "avena 60 g", "leche 250 ml").
+- NO explicaciones, NO consejos, NO markdown.
+- Macros por comida y total_dia > 0.
+- total_dia coherente con suma de comidas.
+
+Formato exacto:
+{
+  "dia": ${day},
+  "total_dia": {"kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0},
+  "comidas": [
+    {
+      "nombre": "string",
+      "items": ["item + cantidad", "item + cantidad"],
+      "kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0
+    }
+  ]
+}
+`.trim();
+}
+
 // ✅ NUEVO: Lista de compras basada en el plan real
 export function buildShoppingPrompt(profile, meta, plan7) {
   const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";

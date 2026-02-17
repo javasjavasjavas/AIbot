@@ -16,7 +16,7 @@ import {
 
 import { cleanStr, cleanList } from "./sanitize.js";
 import { getPlanJson } from "./geminiClient.js";
-import { buildMetaPrompt, buildDayPrompt, buildShoppingPrompt } from "./prompts.js";
+import { buildMetaPrompt, buildDayPrompt, buildDayPromptCompact, buildShoppingPrompt } from "./prompts.js";
 import { validateMeta, validateDayPlan } from "./validation.js";
 import { sendDayDetailed, sendPlanDetailed } from "./sender.js";
 
@@ -83,9 +83,23 @@ async function getMetaStrict(profile) {
 }
 
 async function getDayStrict(profile, meta, day, mealsPerDay) {
+  const dayMeta = { ...meta, comidas_por_dia: mealsPerDay };
+
+  // Primero intentamos el prompt normal (mejor detalle).
+  for (let i = 1; i <= 2; i++) {
+    const dayObj = await getPlanJson(
+      buildDayPrompt(profile, dayMeta, day),
+      { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 }
+    );
+
+    const v = validateDayPlan(dayObj, mealsPerDay);
+    if (v.ok) return dayObj;
+  }
+
+  // Fallback compacto: reduce salida para evitar MAX_TOKENS.
   for (let i = 1; i <= 4; i++) {
     const dayObj = await getPlanJson(
-      buildDayPrompt(profile, { ...meta, comidas_por_dia: mealsPerDay }, day),
+      buildDayPromptCompact(profile, dayMeta, day),
       { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 }
     );
 
@@ -94,13 +108,13 @@ async function getDayStrict(profile, meta, day, mealsPerDay) {
   }
 
   const hardPrompt =
-    buildDayPrompt(profile, { ...meta, comidas_por_dia: mealsPerDay }, day) +
+    buildDayPromptCompact(profile, dayMeta, day) +
     "\n\nIMPORTANTE: Ninguna comida ni total puede tener kcal/macros en 0. " +
-    "Total_dia debe ser coherente con la suma. Respetá EXACTAMENTE la cantidad de comidas.";
+    "Total_dia debe ser coherente con la suma. Respeta EXACTAMENTE la cantidad de comidas.";
 
   const last = await getPlanJson(hardPrompt, { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 });
   const v2 = validateDayPlan(last, mealsPerDay);
-  if (!v2.ok) throw new Error(`Día ${day} inválido: ${v2.reason}`);
+  if (!v2.ok) throw new Error(`Dia ${day} invalido: ${v2.reason}`);
   return last;
 }
 
