@@ -16,7 +16,7 @@ import {
 
 import { cleanStr, cleanList } from "./sanitize.js";
 import { getPlanJson } from "./geminiClient.js";
-import { buildMetaPrompt, buildDayPrompt, buildDayPromptCompact, buildShoppingPrompt } from "./prompts.js";
+import { buildMetaPrompt, buildDayPrompt, buildDayPromptCompact, buildMissingMealsPrompt, buildShoppingPrompt } from "./prompts.js";
 import { validateMeta, validateDayPlan } from "./validation.js";
 import { sendDayDetailed, sendPlanDetailed } from "./sender.js";
 
@@ -82,27 +82,66 @@ async function getMetaStrict(profile) {
   return meta2;
 }
 
+function num(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function sumMeals(meals = []) {
+  return meals.reduce(
+    (acc, m) => ({
+      kcal: acc.kcal + num(m?.kcal),
+      proteina_g: acc.proteina_g + num(m?.proteina_g),
+      carbos_g: acc.carbos_g + num(m?.carbos_g),
+      grasas_g: acc.grasas_g + num(m?.grasas_g)
+    }),
+    { kcal: 0, proteina_g: 0, carbos_g: 0, grasas_g: 0 }
+  );
+}
+
+async function completeMissingMeals(profile, meta, day, dayObj, mealsPerDay) {
+  const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
+  if (meals.length >= mealsPerDay) {
+    const clipped = meals.slice(0, mealsPerDay);
+    return { ...dayObj, comidas: clipped, total_dia: sumMeals(clipped) };
+  }
+
+  const missing = mealsPerDay - meals.length;
+  if (missing <= 0) return dayObj;
+
+  const fix = await getPlanJson(
+    buildMissingMealsPrompt(profile, meta, day, meals, missing),
+    { requireKeys: ["comidas_faltantes"], attempts: 2 }
+  );
+
+  const extras = Array.isArray(fix?.comidas_faltantes) ? fix.comidas_faltantes : [];
+  const finalMeals = [...meals, ...extras].slice(0, mealsPerDay);
+  return { ...dayObj, comidas: finalMeals, total_dia: sumMeals(finalMeals) };
+}
+
 async function getDayStrict(profile, meta, day, mealsPerDay) {
   const dayMeta = { ...meta, comidas_por_dia: mealsPerDay };
 
   // Primero intentamos el prompt normal (mejor detalle).
   for (let i = 1; i <= 2; i++) {
-    const dayObj = await getPlanJson(
+    let dayObj = await getPlanJson(
       buildDayPrompt(profile, dayMeta, day),
       { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 }
     );
 
+    dayObj = await completeMissingMeals(profile, dayMeta, day, dayObj, mealsPerDay);
     const v = validateDayPlan(dayObj, mealsPerDay);
     if (v.ok) return dayObj;
   }
 
   // Fallback compacto: reduce salida para evitar MAX_TOKENS.
   for (let i = 1; i <= 4; i++) {
-    const dayObj = await getPlanJson(
+    let dayObj = await getPlanJson(
       buildDayPromptCompact(profile, dayMeta, day),
       { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 }
     );
 
+    dayObj = await completeMissingMeals(profile, dayMeta, day, dayObj, mealsPerDay);
     const v = validateDayPlan(dayObj, mealsPerDay);
     if (v.ok) return dayObj;
   }
@@ -112,7 +151,8 @@ async function getDayStrict(profile, meta, day, mealsPerDay) {
     "\n\nIMPORTANTE: Ninguna comida ni total puede tener kcal/macros en 0. " +
     "Total_dia debe ser coherente con la suma. Respeta EXACTAMENTE la cantidad de comidas.";
 
-  const last = await getPlanJson(hardPrompt, { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 });
+  let last = await getPlanJson(hardPrompt, { requireKeys: ["dia", "total_dia", "comidas"], attempts: 2 });
+  last = await completeMissingMeals(profile, dayMeta, day, last, mealsPerDay);
   const v2 = validateDayPlan(last, mealsPerDay);
   if (!v2.ok) throw new Error(`Dia ${day} invalido: ${v2.reason}`);
   return last;

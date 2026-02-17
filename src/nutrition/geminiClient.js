@@ -80,7 +80,7 @@ async function fetchGemini(url, payload) {
 
 export async function callGemini(
   prompt,
-  { responseMimeType, maxOutputTokens = 4200, temperature = 0.2 } = {}
+  { responseMimeType, maxOutputTokens = 8192, temperature = 0.2 } = {}
 ) {
   if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
@@ -134,7 +134,7 @@ export async function getJsonWithRepair(prompt, { requireKeys = [], attempts = 3
     const raw = await callGemini(prompt, {
       responseMimeType: "application/json",
       temperature: i === 1 ? 0.25 : 0.0,
-      maxOutputTokens: 4200
+      maxOutputTokens: 8192
     });
 
     lastRaw = raw;
@@ -150,7 +150,7 @@ export async function getJsonWithRepair(prompt, { requireKeys = [], attempts = 3
     const repaired = await callGemini(repairPrompt, {
       responseMimeType: "application/json",
       temperature: 0.0,
-      maxOutputTokens: 4200
+      maxOutputTokens: 8192
     });
 
     const obj2 = parseJsonLoose(repaired);
@@ -163,7 +163,7 @@ export async function getJsonWithRepair(prompt, { requireKeys = [], attempts = 3
     "DEVOLVE SOLO JSON VALIDO. Sin explicaciones. Sin texto extra. " +
     "Sin markdown. Sin comentarios. Solo objeto JSON completo y parseable.\n\n" +
     prompt,
-    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 4200 }
+    { responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 8192 }
   );
 
   const obj3 = parseJsonLoose(force);

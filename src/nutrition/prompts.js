@@ -141,6 +141,46 @@ Formato exacto:
 `.trim();
 }
 
+export function buildMissingMealsPrompt(profile, meta, day, currentMeals = [], missingCount = 1) {
+  const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";
+  const t = meta?.targets_diarios || {};
+  const usedNames = currentMeals
+    .map(m => String(m?.nombre || "").trim())
+    .filter(Boolean)
+    .join(", ");
+
+  return `
+Sos nutricionista deportivo. Responde SOLO JSON valido.
+
+Necesito completar comidas faltantes del Dia ${day}.
+- objetivo: ${goal}
+- comidas faltantes: ${missingCount}
+- comidas ya usadas (no repetir nombre): ${usedNames || "ninguna"}
+- target_kcal: ${t.kcal ?? 0}
+- target_p: ${t.proteina_g ?? 0}
+- target_c: ${t.carbos_g ?? 0}
+- target_g: ${t.grasas_g ?? 0}
+
+Reglas:
+- Devolver EXACTAMENTE ${missingCount} comidas en "comidas_faltantes".
+- Cada comida con nombre, items (2 a 4), kcal, proteina_g, carbos_g, grasas_g.
+- Cantidades reales (g/ml/unidades).
+- Todos los macros > 0.
+- Sin texto adicional.
+
+Formato:
+{
+  "comidas_faltantes": [
+    {
+      "nombre": "string",
+      "items": ["item + cantidad", "item + cantidad"],
+      "kcal": 0, "proteina_g": 0, "carbos_g": 0, "grasas_g": 0
+    }
+  ]
+}
+`.trim();
+}
+
 // ✅ NUEVO: Lista de compras basada en el plan real
 export function buildShoppingPrompt(profile, meta, plan7) {
   const goal = profile.objective ? `${profile.objective} (${objectiveLabel(profile.objective)})` : "no definido";
