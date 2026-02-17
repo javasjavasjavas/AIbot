@@ -1,7 +1,8 @@
+// src/nutrition/sender.js
 import { sendText } from "../whatsapp.js";
 import { cleanStr, cleanList } from "./sanitize.js";
 
-const WA_CHUNK_LIMIT = 650;  // más bajo para evitar "Leer más"
+const WA_CHUNK_LIMIT = 650;   // más bajo para evitar "Leer más"
 const WA_HARD_LIMIT = 1200;
 
 function num(x) {
@@ -22,6 +23,16 @@ function emojiForMeal(name = "") {
   if (t.includes("cena")) return "🌙";
   if (t.includes("post")) return "🏋️";
   return "🍽️";
+}
+
+async function safeSend(api, waId, msg) {
+  try {
+    await sendText(api, waId, msg);
+    return true;
+  } catch (e) {
+    console.error("❌ sendText failed:", e?.message || e);
+    return false;
+  }
 }
 
 function fmtMeal(meal, index) {
@@ -78,25 +89,26 @@ function chunkByLines(text, limit = WA_CHUNK_LIMIT) {
       cur = line;
     }
   }
+
   if (cur) chunks.push(cur);
   return chunks;
 }
 
 async function sendDay(api, waId, dayObj) {
+  // Header
+  if (!(await safeSend(api, waId, cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT)))) return;
+
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
-
-  // ✅ estrategia: 1 mensaje = header, y luego 1 mensaje por comida
-  // si una comida excede, la partimos por líneas
-  await sendText(api, waId, cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT));
-
   for (let i = 0; i < meals.length; i++) {
     const block = fmtMeal(meals[i], i);
     if (block.length <= WA_CHUNK_LIMIT) {
-      await sendText(api, waId, cleanStr(block, WA_HARD_LIMIT));
+      const ok = await safeSend(api, waId, cleanStr(block, WA_HARD_LIMIT));
+      if (!ok) return;
     } else {
       const parts = chunkByLines(block, WA_CHUNK_LIMIT);
       for (const p of parts) {
-        await sendText(api, waId, cleanStr(p, WA_HARD_LIMIT));
+        const ok = await safeSend(api, waId, cleanStr(p, WA_HARD_LIMIT));
+        if (!ok) return;
       }
     }
   }
@@ -139,7 +151,7 @@ function formatShoppingList(lista) {
 export async function sendPlanDetailed(api, waId, planObj) {
   const plan = Array.isArray(planObj?.plan_7_dias) ? planObj.plan_7_dias : [];
   if (!plan.length) {
-    await sendText(api, waId, "No pude generar el plan completo. Probemos de nuevo.");
+    await safeSend(api, waId, "No pude generar el plan completo. Probemos de nuevo.");
     return;
   }
 
@@ -151,23 +163,28 @@ export async function sendPlanDetailed(api, waId, planObj) {
 
   for (let d = 1; d <= 7; d++) {
     const dayObj = byDay.get(d);
-    if (dayObj) await sendDay(api, waId, dayObj);
+    if (dayObj) {
+      await sendDay(api, waId, dayObj);
+    }
   }
 
   const train = cleanList(planObj?.entrenamiento_complementario, 4, 220);
   if (train.length) {
-    await sendText(api, waId, `🏋️ ${bold("Entrenamiento complementario")}:\n- ${train.join("\n- ")}`);
+    await safeSend(api, waId, `🏋️ ${bold("Entrenamiento complementario")}:\n- ${train.join("\n- ")}`);
   }
 
   const shoppingMsg = formatShoppingList(planObj?.lista_compras);
   if (shoppingMsg) {
     const parts = chunkByLines(shoppingMsg, WA_CHUNK_LIMIT);
-    for (const p of parts) await sendText(api, waId, cleanStr(p, WA_HARD_LIMIT));
+    for (const p of parts) {
+      const ok = await safeSend(api, waId, cleanStr(p, WA_HARD_LIMIT));
+      if (!ok) return;
+    }
   }
 
   const ant = cleanStr(planObj?.sugerir_antropometria ?? "", 380);
   const der = cleanStr(planObj?.derivacion ?? "", 380);
 
-  if (ant) await sendText(api, waId, `📏 ${bold("Antropometría")}:\n${ant}`);
-  if (der) await sendText(api, waId, `🩺 ${bold("Derivación sugerida")}:\n${der}`);
+  if (ant) await safeSend(api, waId, `📏 ${bold("Antropometría")}:\n${ant}`);
+  if (der) await safeSend(api, waId, `🩺 ${bold("Derivación sugerida")}:\n${der}`);
 }
