@@ -89,21 +89,14 @@ function fmtDayHeader(dayObj) {
 
 // ✅ export: enviar UN DÍA completo (header + comidas chunked)
 export async function sendDayDetailed(api, waId, dayObj) {
-  const header = cleanStr(fmtDayHeader(dayObj), WA_HARD_LIMIT);
-  if (!(await safeSend(api, waId, header))) return false;
-
+  const header = fmtDayHeader(dayObj);
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
-  for (let i = 0; i < meals.length; i++) {
-    const block = fmtMeal(meals[i], i);
+  const mealBlocks = meals.map((m, i) => fmtMeal(m, i));
+  const fullDay = [header, ...mealBlocks].join("\n\n");
+  const parts = chunkByLines(fullDay, 900);
 
-    if (block.length <= WA_CHUNK_LIMIT) {
-      if (!(await safeSend(api, waId, cleanStr(block, WA_HARD_LIMIT)))) return false;
-    } else {
-      const parts = chunkByLines(block, WA_CHUNK_LIMIT);
-      for (const p of parts) {
-        if (!(await safeSend(api, waId, cleanStr(p, WA_HARD_LIMIT)))) return false;
-      }
-    }
+  for (const part of parts) {
+    if (!(await safeSend(api, waId, cleanStr(part, WA_HARD_LIMIT)))) return false;
   }
   return true;
 }

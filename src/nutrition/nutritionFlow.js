@@ -99,6 +99,50 @@ function sumMeals(meals = []) {
   );
 }
 
+function inferCategory(item = "") {
+  const t = normalizeText(item);
+  if (!t) return "varios";
+  if (/(pollo|carne|pescado|salmon|atun|huevo|whey|proteina|queso|yogur|yogurt|leche)/.test(t)) return "proteinas";
+  if (/(arroz|avena|pan|papa|patata|batata|fideos|pasta|tortilla|galleta|quinoa|cereal)/.test(t)) return "carbohidratos";
+  if (/(manzana|banana|platano|naranja|pera|fruta|brocoli|brocoli|lechuga|tomate|zanahoria|pepino|verdura|espinaca)/.test(t)) return "frutas_verduras";
+  if (/(leche|yogur|yogurt|queso|ricota|kefir)/.test(t)) return "lacteos";
+  if (/(aceite|palta|aguacate|nuez|almendra|mani|semilla|mantequilla de mani)/.test(t)) return "grasas";
+  return "varios";
+}
+
+function extractItemName(raw = "") {
+  const s = cleanStr(raw, 140);
+  return s
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\b\d+[.,]?\d*\s?(g|gr|gramos|kg|ml|l|unidad(?:es)?|u)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function buildShoppingFromPlan(plan7 = []) {
+  const map = new Map();
+  for (const d of plan7) {
+    const meals = Array.isArray(d?.comidas) ? d.comidas : [];
+    for (const m of meals) {
+      const items = Array.isArray(m?.items) ? m.items : [];
+      for (const it of items) {
+        const name = extractItemName(it);
+        if (!name) continue;
+        const key = normalizeText(name);
+        if (!key) continue;
+        if (!map.has(key)) {
+          map.set(key, {
+            categoria: inferCategory(name),
+            item: name,
+            cantidad_aprox: "segun plan semanal"
+          });
+        }
+      }
+    }
+  }
+  return Array.from(map.values()).slice(0, 35);
+}
+
 async function completeMissingMeals(profile, meta, day, dayObj, mealsPerDay) {
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
   if (meals.length >= mealsPerDay) {
@@ -339,6 +383,9 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
         listaCompras = Array.isArray(shopObj?.lista_compras) ? shopObj.lista_compras : [];
       } catch (e) {
         logError("❌ Shopping failed:", e?.message || e);
+      }
+      if (!listaCompras.length) {
+        listaCompras = buildShoppingFromPlan(plan_7_dias);
       }
 
       const planObj = {

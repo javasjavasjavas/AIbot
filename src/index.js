@@ -89,6 +89,42 @@ function enqueueUserTask(waId, task) {
   return next;
 }
 
+function normalizeText(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function isGymEntry(text) {
+  const t = normalizeText(text);
+  return t === "1" || t.includes("gimnasio") || t === "gym";
+}
+
+function isNutritionEntry(text) {
+  const t = normalizeText(text);
+  return t === "2" || t.includes("nutri") || t.includes("nutricion");
+}
+
+function formatGymMenuText() {
+  return (
+    "Perfecto. Elegi una opcion:\n\n" +
+    "1) Conoce nuestros planes y precios\n" +
+    "2) Consultar por una clase\n" +
+    "3) Quiero saber como ejecutar un ejercicio\n\n" +
+    "Responde 1, 2 o 3."
+  );
+}
+
+function parseGymMenuChoice(text) {
+  const t = normalizeText(text);
+  if (t === "1" || t.includes("plan") || t.includes("precio")) return 1;
+  if (t === "2" || t.includes("clase") || t.includes("horario")) return 2;
+  if (t === "3" || t.includes("ejercicio") || t.includes("como ejecutar") || t.includes("como hacer")) return 3;
+  return 0;
+}
+
 async function processIncomingText(waId, text, ctx = {}) {
   if (!text.trim()) return;
 
@@ -103,8 +139,15 @@ async function processIncomingText(waId, text, ctx = {}) {
   const state = getState(waId);
 
   if (state.flow === "menu") {
-    if (shouldAutoStartNutrition(text)) {
+    if (isNutritionEntry(text) || shouldAutoStartNutrition(text)) {
       await handleNutritionMessage(api, waId, text, ctx);
+      return;
+    }
+
+    if (isGymEntry(text)) {
+      state.flow = "gym";
+      state.gymStep = "menu";
+      await sendLongText(api, waId, formatGymMenuText(), 1400);
       return;
     }
 
@@ -114,10 +157,34 @@ async function processIncomingText(waId, text, ctx = {}) {
     }
 
     state.flow = "gym";
+    state.gymStep = null;
   }
 
   if (state.flow === "nutrition") {
     await handleNutritionMessage(api, waId, text, ctx);
+    return;
+  }
+
+  if (state.flow === "gym" && state.gymStep === "menu") {
+    const choice = parseGymMenuChoice(text);
+    if (choice === 1) {
+      state.gymStep = null;
+      await sendLongText(api, waId, formatPlansText(), 1400);
+      if (PLANS_IMAGE_URL) await sendImage(api, waId, PLANS_IMAGE_URL, "Planes disponibles");
+      return;
+    }
+    if (choice === 2) {
+      state.gymStep = null;
+      await sendText(api, waId, "Decime que clase te interesa (Funcional / Zumba / etc.) y te paso dias y horarios.");
+      if (CLASSES_IMAGE_URL) await sendImage(api, waId, CLASSES_IMAGE_URL, "Grilla de clases");
+      return;
+    }
+    if (choice === 3) {
+      state.gymStep = null;
+      await sendText(api, waId, "Decime el ejercicio exacto y, si queres, agrega: 'mostrame una imagen'.");
+      return;
+    }
+    await sendLongText(api, waId, formatGymMenuText(), 1400);
     return;
   }
 
