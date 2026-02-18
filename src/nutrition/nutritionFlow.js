@@ -143,6 +143,30 @@ function buildShoppingFromPlan(plan7 = []) {
   return Array.from(map.values()).slice(0, 35);
 }
 
+function mergeShoppingLists(primary = [], secondary = []) {
+  const out = [];
+  const seen = new Set();
+
+  const pushItem = (it) => {
+    if (!it) return;
+    const item = cleanStr(it?.item || "", 90);
+    if (!item) return;
+    const key = normalizeText(item);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      categoria: cleanStr(it?.categoria || inferCategory(item), 40) || "varios",
+      item,
+      cantidad_aprox: cleanStr(it?.cantidad_aprox || "segun plan semanal", 50)
+    });
+  };
+
+  for (const it of primary) pushItem(it);
+  for (const it of secondary) pushItem(it);
+
+  return out.slice(0, 45);
+}
+
 async function completeMissingMeals(profile, meta, day, dayObj, mealsPerDay) {
   const meals = Array.isArray(dayObj?.comidas) ? dayObj.comidas : [];
   if (meals.length >= mealsPerDay) {
@@ -374,19 +398,18 @@ export async function handleNutritionMessage(api, waId, text, ctx = {}) {
       }
 
       // Lista compras desde el plan real
-      let listaCompras = [];
+      let listaComprasIA = [];
       try {
         const shopObj = await getPlanJson(buildShoppingPrompt(state.nutritionProfile, meta, plan_7_dias), {
           requireKeys: ["lista_compras"],
           attempts: 2
         });
-        listaCompras = Array.isArray(shopObj?.lista_compras) ? shopObj.lista_compras : [];
+        listaComprasIA = Array.isArray(shopObj?.lista_compras) ? shopObj.lista_compras : [];
       } catch (e) {
         logError("❌ Shopping failed:", e?.message || e);
       }
-      if (!listaCompras.length) {
-        listaCompras = buildShoppingFromPlan(plan_7_dias);
-      }
+      const listaComprasPlan = buildShoppingFromPlan(plan_7_dias);
+      const listaCompras = mergeShoppingLists(listaComprasIA, listaComprasPlan);
 
       const planObj = {
         diagnostico_breve: diag,

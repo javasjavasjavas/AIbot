@@ -140,16 +140,7 @@ export async function sendPlanDetailed(api, waId, planObj) {
     return;
   }
 
-  const byDay = new Map();
-  for (const d of plan) {
-    const n = num(d?.dia);
-    if (n >= 1 && n <= 7 && !byDay.has(n)) byDay.set(n, d);
-  }
 
-  for (let d = 1; d <= 7; d++) {
-    const dayObj = byDay.get(d);
-    if (dayObj) await sendDayDetailed(api, waId, dayObj);
-  }
 
   const train = cleanList(planObj?.entrenamiento_complementario, 4, 220);
   if (train.length) {
