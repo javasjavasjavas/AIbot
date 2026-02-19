@@ -44,12 +44,23 @@ app.use("/img", express.static(GENERATED_DIR));
 
 const api = { PHONE_NUMBER_ID, WHATSAPP_TOKEN };
 const baseCtx = { PUBLIC_BASE_URL, LOG_LEVEL };
+
+function normalizePhoneNumber(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 const allowedTestNumbers = new Set(
   ALLOWED_TEST_NUMBERS_RAW
     .split(",")
-    .map((n) => String(n || "").trim().replace(/^\+/, ""))
+    .map((n) => normalizePhoneNumber(n))
     .filter(Boolean)
 );
+
+if (allowedTestNumbers.size) {
+  logInfo("Allowlist enabled for wa_id:", [...allowedTestNumbers].join(", "));
+} else {
+  logInfo("Allowlist disabled (no ALLOWED_TEST_NUMBERS configured).");
+}
 
 // Idempotency for incoming webhook events (Meta can retry same message id).
 const seenMessageIds = new Map();
@@ -64,7 +75,7 @@ function normalizeWaId(rawWaId) {
 
 function isAllowedWaId(waId) {
   if (!allowedTestNumbers.size) return true;
-  const normalized = String(waId || "").trim().replace(/^\+/, "");
+  const normalized = normalizePhoneNumber(waId);
   return allowedTestNumbers.has(normalized);
 }
 
