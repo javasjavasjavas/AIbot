@@ -2,6 +2,28 @@ async function safeRead(r) {
   try { return await r.json(); } catch { return await r.text(); }
 }
 
+function isRecipientNotAllowedError(body) {
+  return body?.error?.code === 131030;
+}
+
+function alternateArWaId(to) {
+  const raw = String(to || "").trim().replace(/^\+/, "");
+  if (!raw.startsWith("549")) return "";
+  return "54" + raw.slice(3);
+}
+
+async function postWhatsappMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, payload) {
+  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+}
+
 export function whatsappSafeText(text) {
   return (text || "")
     .replace(/###/g, "")
@@ -57,45 +79,47 @@ const DEBUG_SEND = process.env.LOG_LEVEL === "debug";
 export async function sendText({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, text) {
   if (DEBUG_SEND) console.log("sendText len:", (text || "").length);
 
-  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text }
-    })
-  });
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text }
+  };
+  let r = await postWhatsappMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, payload);
+  let body = null;
 
   if (!r.ok) {
-    const body = await safeRead(r);
+    body = await safeRead(r);
+    const fallbackTo = alternateArWaId(to);
+    if (r.status === 400 && fallbackTo && isRecipientNotAllowedError(body)) {
+      const fallbackPayload = { ...payload, to: fallbackTo };
+      r = await postWhatsappMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, fallbackPayload);
+      if (r.ok) return;
+      body = await safeRead(r);
+    }
     throw new Error(`sendText failed ${r.status}: ${JSON.stringify(body)}`);
   }
 }
 
 export async function sendImage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, to, imageUrl, caption) {
-  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "image",
-      image: { link: imageUrl, caption }
-    })
-  });
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: { link: imageUrl, caption }
+  };
+  let r = await postWhatsappMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, payload);
+  let body = null;
 
   if (!r.ok) {
-    const body = await safeRead(r);
+    body = await safeRead(r);
+    const fallbackTo = alternateArWaId(to);
+    if (r.status === 400 && fallbackTo && isRecipientNotAllowedError(body)) {
+      const fallbackPayload = { ...payload, to: fallbackTo };
+      r = await postWhatsappMessage({ PHONE_NUMBER_ID, WHATSAPP_TOKEN }, fallbackPayload);
+      if (r.ok) return;
+      body = await safeRead(r);
+    }
     throw new Error(`sendImage failed ${r.status}: ${JSON.stringify(body)}`);
   }
 }
