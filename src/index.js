@@ -27,6 +27,7 @@ import { getState, resetToMenu } from "./nutrition/state.js";
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const ALLOWED_TEST_NUMBERS_RAW = process.env.ALLOWED_TEST_NUMBERS || process.env.ALLOWED_TEST_NUMBER || "";
 
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://aibot-hsjq.onrender.com").replace(/\/$/, "");
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
@@ -43,6 +44,12 @@ app.use("/img", express.static(GENERATED_DIR));
 
 const api = { PHONE_NUMBER_ID, WHATSAPP_TOKEN };
 const baseCtx = { PUBLIC_BASE_URL, LOG_LEVEL };
+const allowedTestNumbers = new Set(
+  ALLOWED_TEST_NUMBERS_RAW
+    .split(",")
+    .map((n) => String(n || "").trim().replace(/^\+/, ""))
+    .filter(Boolean)
+);
 
 // Idempotency for incoming webhook events (Meta can retry same message id).
 const seenMessageIds = new Map();
@@ -52,9 +59,13 @@ const SEEN_TTL_MS = 10 * 60 * 1000;
 const userQueue = new Map();
 
 function normalizeWaId(rawWaId) {
-  let waId = rawWaId || "";
-  if (waId.startsWith("549")) waId = "54" + waId.slice(3);
-  return waId;
+  return String(rawWaId || "").trim();
+}
+
+function isAllowedWaId(waId) {
+  if (!allowedTestNumbers.size) return true;
+  const normalized = String(waId || "").trim().replace(/^\+/, "");
+  return allowedTestNumbers.has(normalized);
 }
 
 function cleanupSeenMessageIds(now = Date.now()) {
@@ -273,6 +284,10 @@ app.post("/webhook", (req, res) => {
     const msgType = message?.type || "";
 
     if (!waId) continue;
+    if (!isAllowedWaId(waId)) {
+      logWarn(`Skip message from non-allowlisted wa_id=${waId}`);
+      continue;
+    }
     if (msgType !== "text") continue;
     if (!text.trim()) continue;
 
