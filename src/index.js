@@ -13,6 +13,7 @@ import {
   CLASSES_IMAGE_URL,
   PLANS_IMAGE_URL
 } from "./gymContent.js";
+import { inferIntentWithAI } from "./intentRouter.js";
 import {
   generateExerciseImageAndSave,
   buildExerciseImagePrompt,
@@ -141,21 +142,42 @@ function formatGymMenuText() {
   );
 }
 
-function formatTopicScopeText() {
-  return (
-    "Por ahora puedo ayudarte con estos temas:\n\n" +
-    "1) Gimnasio: planes, precios, horarios y ejercicios\n" +
-    "2) Nutricion: onboarding y plan semanal\n\n" +
-    "Escribi 'gimnasio' o 'nutricion' para empezar."
-  );
-}
-
 function parseGymMenuChoice(text) {
   const t = normalizeText(text);
   if (t === "1" || t.includes("plan") || t.includes("precio")) return 1;
   if (t === "2" || t.includes("clase") || t.includes("horario")) return 2;
   if (t === "3" || t.includes("ejercicio") || t.includes("como ejecutar") || t.includes("como hacer")) return 3;
   return 0;
+}
+
+async function handleGymIntentLabel(waId, label, state = null) {
+  if (label === "prices") {
+    if (state) state.gymStep = null;
+    await sendLongText(api, waId, formatPlansText(), 1400);
+    if (PLANS_IMAGE_URL) await sendImage(api, waId, PLANS_IMAGE_URL, "Planes disponibles");
+    return true;
+  }
+
+  if (label === "hours") {
+    if (state) state.gymStep = null;
+    await sendLongText(api, waId, formatGymHoursText(), 1400);
+    return true;
+  }
+
+  if (label === "classes") {
+    if (state) state.gymStep = null;
+    await sendText(api, waId, "Decime que clase te interesa (Funcional / Zumba / etc.) y te paso dias y horarios.");
+    if (CLASSES_IMAGE_URL) await sendImage(api, waId, CLASSES_IMAGE_URL, "Grilla de clases");
+    return true;
+  }
+
+  if (label === "exercise") {
+    if (state) state.gymStep = null;
+    await sendText(api, waId, "Decime el ejercicio exacto y, si queres, agrega: 'mostrame una imagen'.");
+    return true;
+  }
+
+  return false;
 }
 
 async function processIncomingText(waId, text, ctx = {}) {
@@ -170,6 +192,12 @@ async function processIncomingText(waId, text, ctx = {}) {
   }
 
   const state = getState(waId);
+  let cachedAiIntent = undefined;
+  const getAiIntent = async () => {
+    if (cachedAiIntent !== undefined) return cachedAiIntent;
+    cachedAiIntent = await inferIntentWithAI(text);
+    return cachedAiIntent;
+  };
 
   if (state.flow === "menu") {
     if (isNutritionEntry(text) || shouldAutoStartNutrition(text)) {
@@ -185,7 +213,19 @@ async function processIncomingText(waId, text, ctx = {}) {
     }
 
     if (!isGymIntent(text)) {
-      await sendLongText(api, waId, formatTopicScopeText(), 1400);
+      const aiIntent = await getAiIntent();
+      if (aiIntent?.domain === "nutrition" && aiIntent.confidence >= 0.6) {
+        await handleNutritionMessage(api, waId, text, ctx);
+        return;
+      }
+
+      if (aiIntent?.domain === "gym" && aiIntent.confidence >= 0.6) {
+        state.flow = "gym";
+        state.gymStep = null;
+        if (await handleGymIntentLabel(waId, aiIntent.gymIntent, state)) return;
+      }
+
+      await sendLongText(api, waId, formatMenuText(), 1400);
       return;
     }
 
@@ -222,19 +262,17 @@ async function processIncomingText(waId, text, ctx = {}) {
   }
 
   if (isAskingPrices(text)) {
-    await sendLongText(api, waId, formatPlansText(), 1400);
-    if (PLANS_IMAGE_URL) await sendImage(api, waId, PLANS_IMAGE_URL, "Planes disponibles");
+    await handleGymIntentLabel(waId, "prices");
     return;
   }
 
   if (isAskingGymHours(text)) {
-    await sendLongText(api, waId, formatGymHoursText(), 1400);
+    await handleGymIntentLabel(waId, "hours");
     return;
   }
 
   if (isAskingClasses(text)) {
-    await sendText(api, waId, "Decime que clase te interesa (Funcional / Zumba / etc.) y te paso dias y horarios.");
-    if (CLASSES_IMAGE_URL) await sendImage(api, waId, CLASSES_IMAGE_URL, "Grilla de clases");
+    await handleGymIntentLabel(waId, "classes");
     return;
   }
 
@@ -261,7 +299,16 @@ async function processIncomingText(waId, text, ctx = {}) {
     return;
   }
 
-  await sendLongText(api, waId, formatTopicScopeText(), 1400);
+  const aiIntent = await getAiIntent();
+  if (aiIntent?.domain === "nutrition" && aiIntent.confidence >= 0.6) {
+    await handleNutritionMessage(api, waId, text, ctx);
+    return;
+  }
+  if (aiIntent?.domain === "gym" && aiIntent.confidence >= 0.6 && await handleGymIntentLabel(waId, aiIntent.gymIntent, state)) {
+    return;
+  }
+
+  await sendLongText(api, waId, formatMenuText(), 1400);
 }
 
 app.get("/", (req, res) => res.send("Gym Coach Bot ONLINE"));
