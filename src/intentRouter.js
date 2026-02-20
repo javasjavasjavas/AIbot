@@ -47,3 +47,41 @@ export async function inferIntentWithAI(text) {
     return null;
   }
 }
+
+function normalizeGymHoursIntent(v) {
+  const x = String(v || "").toLowerCase().trim();
+  const valid = new Set(["full_grid", "open_now", "open_today", "close_today"]);
+  return valid.has(x) ? x : "full_grid";
+}
+
+export async function inferGymHoursIntentWithAI(text) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned) return null;
+
+  const prompt =
+    "Clasifica SOLO la intencion horaria del mensaje.\n" +
+    "Devuelve SOLO JSON valido con este esquema exacto:\n" +
+    "{ \"hours_intent\": \"full_grid|open_now|open_today|close_today\", \"confidence\": 0 }\n" +
+    "Reglas:\n" +
+    "- 'ahora esta abierto' => open_now\n" +
+    "- 'hoy esta abierto' => open_today\n" +
+    "- 'hoy a que hora cierran' => close_today\n" +
+    "- pedidos generales como 'horarios', 'quiero saber los horarios' => full_grid\n" +
+    "- confidence entre 0 y 1.\n\n" +
+    `Mensaje: """${cleaned}"""`;
+
+  try {
+    const out = await getPlanJson(prompt, {
+      requireKeys: ["hours_intent", "confidence"],
+      attempts: 1
+    });
+    const confidenceNum = Number(out?.confidence);
+    const confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0;
+    return {
+      hoursIntent: normalizeGymHoursIntent(out?.hours_intent),
+      confidence
+    };
+  } catch {
+    return null;
+  }
+}

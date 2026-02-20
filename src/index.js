@@ -8,12 +8,13 @@ import {
   isExerciseIntent,
   wantsImage,
   formatPlansText,
-  formatGymHoursText,
+  formatGymHoursAnswer,
+  formatGymHoursGridText,
   isGymIntent,
   CLASSES_IMAGE_URL,
   PLANS_IMAGE_URL
 } from "./gymContent.js";
-import { inferIntentWithAI } from "./intentRouter.js";
+import { inferIntentWithAI, inferGymHoursIntentWithAI } from "./intentRouter.js";
 import {
   generateExerciseImageAndSave,
   buildExerciseImagePrompt,
@@ -160,7 +161,7 @@ async function handleGymIntentLabel(waId, label, state = null) {
 
   if (label === "hours") {
     if (state) state.gymStep = null;
-    await sendLongText(api, waId, formatGymHoursText(), 1400);
+    await sendLongText(api, waId, formatGymHoursGridText(), 1400);
     return true;
   }
 
@@ -178,6 +179,27 @@ async function handleGymIntentLabel(waId, label, state = null) {
   }
 
   return false;
+}
+
+function fallbackHoursIntent(text) {
+  const t = normalizeText(text);
+  if ((t.includes("ahora") || t.includes("en este momento")) && (t.includes("abierto") || t.includes("abierta") || t.includes("abre"))) {
+    return "open_now";
+  }
+  if (t.includes("hoy") && (t.includes("cierra") || t.includes("cierran") || t.includes("cierre"))) {
+    return "close_today";
+  }
+  if (t.includes("hoy") && (t.includes("abierto") || t.includes("abierta") || t.includes("abre"))) {
+    return "open_today";
+  }
+  return "full_grid";
+}
+
+async function handleGymHoursQuestion(waId, text) {
+  const ai = await inferGymHoursIntentWithAI(text);
+  const hoursIntent = ai?.confidence >= 0.6 ? ai.hoursIntent : fallbackHoursIntent(text);
+  const reply = formatGymHoursAnswer(hoursIntent);
+  await sendLongText(api, waId, reply, 1400);
 }
 
 async function processIncomingText(waId, text, ctx = {}) {
@@ -222,6 +244,10 @@ async function processIncomingText(waId, text, ctx = {}) {
       if (aiIntent?.domain === "gym" && aiIntent.confidence >= 0.6) {
         state.flow = "gym";
         state.gymStep = null;
+        if (aiIntent.gymIntent === "hours") {
+          await handleGymHoursQuestion(waId, text);
+          return;
+        }
         if (await handleGymIntentLabel(waId, aiIntent.gymIntent, state)) return;
       }
 
@@ -267,7 +293,7 @@ async function processIncomingText(waId, text, ctx = {}) {
   }
 
   if (isAskingGymHours(text)) {
-    await handleGymIntentLabel(waId, "hours");
+    await handleGymHoursQuestion(waId, text);
     return;
   }
 
@@ -304,8 +330,12 @@ async function processIncomingText(waId, text, ctx = {}) {
     await handleNutritionMessage(api, waId, text, ctx);
     return;
   }
-  if (aiIntent?.domain === "gym" && aiIntent.confidence >= 0.6 && await handleGymIntentLabel(waId, aiIntent.gymIntent, state)) {
-    return;
+  if (aiIntent?.domain === "gym" && aiIntent.confidence >= 0.6) {
+    if (aiIntent.gymIntent === "hours") {
+      await handleGymHoursQuestion(waId, text);
+      return;
+    }
+    if (await handleGymIntentLabel(waId, aiIntent.gymIntent, state)) return;
   }
 
   await sendLongText(api, waId, formatMenuText(), 1400);

@@ -32,6 +32,16 @@ function parseGymHours() {
 }
 
 const GYM_HOURS = parseGymHours();
+const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const DAY_LABELS = {
+  mon: "Lunes",
+  tue: "Martes",
+  wed: "Miercoles",
+  thu: "Jueves",
+  fri: "Viernes",
+  sat: "Sabado",
+  sun: "Domingo"
+};
 
 function normalizeText(s) {
   return (s || "")
@@ -137,12 +147,7 @@ function formatDaySlots(slots) {
     .join(" / ");
 }
 
-export function formatGymHoursText() {
-  const status = isOpenNow(GYM_HOURS, GYM_TIMEZONE);
-  const nowStatusText = status.open
-    ? `Estado actual: abierto ahora (hasta ${status.slot?.close || "cierre"}).`
-    : "Estado actual: cerrado ahora.";
-
+export function formatGymHoursGridText() {
   const lines = [
     `- Lunes: ${formatDaySlots(GYM_HOURS.mon)}`,
     `- Martes: ${formatDaySlots(GYM_HOURS.tue)}`,
@@ -156,10 +161,90 @@ export function formatGymHoursText() {
   return (
     "Horarios del gimnasio:\n\n" +
     `${lines.join("\n")}\n\n` +
-    `${nowStatusText}\n` +
-    `Zona horaria: ${GYM_TIMEZONE}\n\n` +
-    "Si queres, tambien te paso la grilla de clases."
+    `Zona horaria: ${GYM_TIMEZONE}`
   );
+}
+
+function getTodaySlots(dayKey) {
+  const slots = Array.isArray(GYM_HOURS?.[dayKey]) ? GYM_HOURS[dayKey] : [];
+  return slots
+    .map((slot) => ({ open: slot?.open || "", close: slot?.close || "" }))
+    .filter((slot) => parseMinutes(slot.open) !== null && parseMinutes(slot.close) !== null);
+}
+
+function getNextOpening(dayKey, nowMinutes) {
+  const todaySlots = getTodaySlots(dayKey);
+  for (const slot of todaySlots) {
+    const open = parseMinutes(slot.open);
+    if (open !== null && open > nowMinutes) {
+      return { dayKey, open: slot.open };
+    }
+  }
+
+  const startIndex = DAY_ORDER.indexOf(dayKey);
+  for (let i = 1; i <= 7; i++) {
+    const idx = (startIndex + i) % DAY_ORDER.length;
+    const key = DAY_ORDER[idx];
+    const slots = getTodaySlots(key);
+    if (slots.length) return { dayKey: key, open: slots[0].open };
+  }
+  return null;
+}
+
+export function getGymHoursContext() {
+  const now = nowInTimezoneParts(GYM_TIMEZONE);
+  const status = isOpenNow(GYM_HOURS, GYM_TIMEZONE);
+  const todaySlots = getTodaySlots(now.dayKey);
+  const next = getNextOpening(now.dayKey, now.nowMinutes);
+
+  return {
+    timeZone: GYM_TIMEZONE,
+    dayKey: now.dayKey,
+    dayLabel: DAY_LABELS[now.dayKey] || now.dayKey,
+    isOpenNow: status.open,
+    currentSlot: status.slot || null,
+    todaySlots,
+    nextOpening: next
+  };
+}
+
+export function formatGymHoursAnswer(queryType = "full_grid") {
+  const ctx = getGymHoursContext();
+
+  if (queryType === "open_now") {
+    if (ctx.isOpenNow) {
+      return `Si, ahora esta abierto. Hoy cierra a las ${ctx.currentSlot?.close || "--:--"} (${ctx.timeZone}).`;
+    }
+    if (ctx.nextOpening?.dayKey === ctx.dayKey) {
+      return `Ahora esta cerrado. Hoy vuelve a abrir a las ${ctx.nextOpening.open} (${ctx.timeZone}).`;
+    }
+    if (ctx.nextOpening) {
+      return `Ahora esta cerrado. Vuelve a abrir el ${DAY_LABELS[ctx.nextOpening.dayKey]} a las ${ctx.nextOpening.open} (${ctx.timeZone}).`;
+    }
+    return `Ahora esta cerrado. No hay aperturas configuradas en la grilla (${ctx.timeZone}).`;
+  }
+
+  if (queryType === "open_today") {
+    if (ctx.todaySlots.length) {
+      return `Si, hoy (${ctx.dayLabel}) esta abierto en: ${formatDaySlots(ctx.todaySlots)} (${ctx.timeZone}).`;
+    }
+    return `No, hoy (${ctx.dayLabel}) esta cerrado (${ctx.timeZone}).`;
+  }
+
+  if (queryType === "close_today") {
+    if (!ctx.todaySlots.length) {
+      return `Hoy (${ctx.dayLabel}) esta cerrado, no hay horario de cierre (${ctx.timeZone}).`;
+    }
+    const last = ctx.todaySlots[ctx.todaySlots.length - 1];
+    return `Hoy (${ctx.dayLabel}) cierra a las ${last.close} (${ctx.timeZone}).`;
+  }
+
+  return formatGymHoursGridText();
+}
+
+export function formatGymHoursText() {
+  const status = formatGymHoursAnswer("open_now");
+  return `${formatGymHoursGridText()}\n\nEstado actual: ${status.replace(/\.$/, "")}.`;
 }
 
 export function wantsImage(text) {
