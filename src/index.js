@@ -4,9 +4,11 @@ import { sendText, sendImage, sendLongText } from "./whatsapp.js";
 import {
   isAskingPrices,
   isAskingClasses,
+  isAskingGymHours,
   isExerciseIntent,
   wantsImage,
   formatPlansText,
+  formatGymHoursText,
   isGymIntent,
   CLASSES_IMAGE_URL,
   PLANS_IMAGE_URL
@@ -139,6 +141,15 @@ function formatGymMenuText() {
   );
 }
 
+function formatTopicScopeText() {
+  return (
+    "Por ahora puedo ayudarte con estos temas:\n\n" +
+    "1) Gimnasio: planes, precios, horarios y ejercicios\n" +
+    "2) Nutricion: onboarding y plan semanal\n\n" +
+    "Escribi 'gimnasio' o 'nutricion' para empezar."
+  );
+}
+
 function parseGymMenuChoice(text) {
   const t = normalizeText(text);
   if (t === "1" || t.includes("plan") || t.includes("precio")) return 1;
@@ -174,7 +185,7 @@ async function processIncomingText(waId, text, ctx = {}) {
     }
 
     if (!isGymIntent(text)) {
-      await sendLongText(api, waId, formatMenuText(), 1400);
+      await sendLongText(api, waId, formatTopicScopeText(), 1400);
       return;
     }
 
@@ -216,6 +227,11 @@ async function processIncomingText(waId, text, ctx = {}) {
     return;
   }
 
+  if (isAskingGymHours(text)) {
+    await sendLongText(api, waId, formatGymHoursText(), 1400);
+    return;
+  }
+
   if (isAskingClasses(text)) {
     await sendText(api, waId, "Decime que clase te interesa (Funcional / Zumba / etc.) y te paso dias y horarios.");
     if (CLASSES_IMAGE_URL) await sendImage(api, waId, CLASSES_IMAGE_URL, "Grilla de clases");
@@ -245,7 +261,7 @@ async function processIncomingText(waId, text, ctx = {}) {
     return;
   }
 
-  await sendLongText(api, waId, formatMenuText(), 1400);
+  await sendLongText(api, waId, formatTopicScopeText(), 1400);
 }
 
 app.get("/", (req, res) => res.send("Gym Coach Bot ONLINE"));

@@ -46,7 +46,30 @@ export function formatPlansText() {
 
 export function isAskingClasses(text) {
   const t = normalizeText(text);
-  return t.includes("clase") || t.includes("clases") || t.includes("horario") || t.includes("horarios");
+  return t.includes("clase") || t.includes("clases");
+}
+
+export function isAskingGymHours(text) {
+  const t = normalizeText(text);
+  return (
+    t.includes("horario") ||
+    t.includes("horarios") ||
+    t.includes("abre") ||
+    t.includes("abren") ||
+    t.includes("apertura") ||
+    t.includes("cierre") ||
+    t.includes("cierran")
+  );
+}
+
+export function formatGymHoursText() {
+  return (
+    "Horarios del gimnasio (ejemplo):\n\n" +
+    "- Lunes a Viernes: 06:00 a 23:00\n" +
+    "- Sabados: 08:00 a 20:00\n" +
+    "- Domingos y feriados: 09:00 a 14:00\n\n" +
+    "Si queres, tambien te paso la grilla de clases."
+  );
 }
 
 export function wantsImage(text) {
@@ -68,5 +91,5 @@ export function isExerciseIntent(text) {
 }
 
 export function isGymIntent(text) {
-  return isAskingPrices(text) || isAskingClasses(text) || isExerciseIntent(text) || wantsImage(text);
+  return isAskingPrices(text) || isAskingClasses(text) || isAskingGymHours(text) || isExerciseIntent(text) || wantsImage(text);
 }
